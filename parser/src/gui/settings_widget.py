@@ -1,9 +1,12 @@
 """
-Виджет с настройками для выбора формата скачивания и пути сохранения
+Виджет с настройками для скачивания и переименования файлов
 """
 
 import base64
+import glob
 import os
+import re
+import shutil
 from typing import Any, Dict, List
 
 from PyQt6.QtCore import pyqtSignal
@@ -12,11 +15,11 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -86,32 +89,10 @@ class SettingsWidget(QWidget):
         settings_layout.addWidget(self.option_checkboxes["group_by_volumes"])
 
         settings_layout.setSpacing(3)
-        formats_label = QLabel("Формат книги:")
-        formats_label.setStyleSheet("margin-top: 5px;")
-        settings_layout.addWidget(formats_label)
 
-        formats = [
-            ("EPUB", "Универсальный формат для большинства устройств и приложений"),
-            ("FB2", "Популярный в России формат на основе XML"),
-            ("HTML", "Веб-страница для чтения в браузере"),
-            ("TXT", "Простой текст без форматирования и изображений"),
-        ]
-
-        formats_layout = QGridLayout()
-        formats_layout.setSpacing(5)
-
-        for i, (format_name, format_desc) in enumerate(formats):
-            checkbox = QCheckBox(format_name)
-            checkbox.setChecked(format_name == "EPUB")
-            checkbox.setToolTip(format_desc)
-
-            row = i // 4
-            col = i % 4
-            formats_layout.addWidget(checkbox, row, col)
-
-            self.format_checkboxes[format_name] = checkbox
-
-        settings_layout.addLayout(formats_layout)
+        format_label = QLabel("Формат: DOCX (одна глава = один файл)")
+        format_label.setStyleSheet("margin-top: 5px; color: #00f0ff;")
+        settings_layout.addWidget(format_label)
 
         path_label = QLabel("Каталог для сохранения:")
         path_label.setStyleSheet("margin-top: 5px;")
@@ -144,6 +125,75 @@ class SettingsWidget(QWidget):
 
         main_layout.addWidget(self.download_button)
 
+        # --- Секция переименования файлов ---
+        rename_title_label = QLabel("Переименование файлов")
+        rename_title_label.setStyleSheet("margin-top: 10px;")
+        font2 = rename_title_label.font()
+        font2.setBold(True)
+        rename_title_label.setFont(font2)
+        main_layout.addWidget(rename_title_label)
+
+        rename_frame = QFrame()
+        rename_frame.setObjectName("renameFrame")
+        rename_layout = QVBoxLayout(rename_frame)
+
+        src_label = QLabel("Папка-источник:")
+        rename_layout.addWidget(src_label)
+
+        src_path_layout = QHBoxLayout()
+        self.rename_src_edit = QLineEdit()
+        self.rename_src_edit.setReadOnly(True)
+        self.rename_src_edit.setPlaceholderText("Выберите папку с .docx файлами")
+        src_path_layout.addWidget(self.rename_src_edit)
+
+        self.rename_src_button = QPushButton("...")
+        self.rename_src_button.setFixedWidth(30)
+        self.rename_src_button.setToolTip("Выбрать папку-источник")
+        self.rename_src_button.clicked.connect(self._browse_rename_src)
+        src_path_layout.addWidget(self.rename_src_button)
+        rename_layout.addLayout(src_path_layout)
+
+        dst_label = QLabel("Папка-назначение:")
+        rename_layout.addWidget(dst_label)
+
+        dst_path_layout = QHBoxLayout()
+        self.rename_dst_edit = QLineEdit()
+        self.rename_dst_edit.setReadOnly(True)
+        self.rename_dst_edit.setPlaceholderText("Выберите папку для результата")
+        dst_path_layout.addWidget(self.rename_dst_edit)
+
+        self.rename_dst_button = QPushButton("...")
+        self.rename_dst_button.setFixedWidth(30)
+        self.rename_dst_button.setToolTip("Выбрать папку-назначение")
+        self.rename_dst_button.clicked.connect(self._browse_rename_dst)
+        dst_path_layout.addWidget(self.rename_dst_button)
+        rename_layout.addLayout(dst_path_layout)
+
+        rename_buttons_layout = QHBoxLayout()
+
+        self.preview_rename_button = QPushButton("Превью")
+        self.preview_rename_button.setObjectName("previewRenameButton")
+        self.preview_rename_button.setToolTip("Показать как будут выглядеть имена до/после")
+        self.preview_rename_button.clicked.connect(self._preview_rename)
+        rename_buttons_layout.addWidget(self.preview_rename_button)
+
+        self.rename_button = QPushButton("Переименовать")
+        self.rename_button.setObjectName("renameButton")
+        self.rename_button.setToolTip("Копировать файлы с удалением 'Том N' из имени")
+        self.rename_button.clicked.connect(self._do_rename)
+        rename_buttons_layout.addWidget(self.rename_button)
+
+        rename_layout.addLayout(rename_buttons_layout)
+
+        self.rename_log = QTextEdit()
+        self.rename_log.setReadOnly(True)
+        self.rename_log.setMaximumHeight(120)
+        self.rename_log.setPlaceholderText("Лог переименования...")
+        rename_layout.addWidget(self.rename_log)
+
+        main_layout.addWidget(rename_frame)
+        main_layout.addStretch()
+
     def _load_settings(self):
         """Загрузка настроек из модуля settings"""
         for key, checkbox in self.option_checkboxes.items():
@@ -151,29 +201,16 @@ class SettingsWidget(QWidget):
 
         self.path_edit.setText(settings.get("save_directory"))
 
-        selected_formats = settings.get("selected_formats", ["EPUB"])
-        for format_name, checkbox in self.format_checkboxes.items():
-            checkbox.setChecked(format_name in selected_formats)
-
     def _connect_signals(self):
         """Подключение сигналов к слотам"""
         for key, checkbox in self.option_checkboxes.items():
             checkbox.stateChanged.connect(lambda state, k=key: self._save_option(k, bool(state)))
-
-        for checkbox in self.format_checkboxes.values():
-            checkbox.stateChanged.connect(self._save_formats)
 
         self.path_edit.textChanged.connect(lambda text: self._save_option("save_directory", text))
 
     def _save_option(self, key: str, value: Any):
         """Сохранение отдельной настройки"""
         settings.set(key, value)
-        self.settings_changed.emit()
-
-    def _save_formats(self):
-        """Сохранение выбранных форматов"""
-        selected = self.get_selected_formats()
-        settings.set("selected_formats", selected)
         self.settings_changed.emit()
 
     def _browse_directory(self):
@@ -184,13 +221,89 @@ class SettingsWidget(QWidget):
         if directory:
             self.path_edit.setText(os.path.normpath(directory))
 
+    def _browse_rename_src(self):
+        """Выбор папки-источника для переименования"""
+        directory = QFileDialog.getExistingDirectory(
+            self, "Выберите папку-источник", self.rename_src_edit.text() or ""
+        )
+        if directory:
+            self.rename_src_edit.setText(os.path.normpath(directory))
+
+    def _browse_rename_dst(self):
+        """Выбор папки-назначения для переименования"""
+        directory = QFileDialog.getExistingDirectory(
+            self, "Выберите папку-назначение", self.rename_dst_edit.text() or ""
+        )
+        if directory:
+            self.rename_dst_edit.setText(os.path.normpath(directory))
+
+    @staticmethod
+    def _remove_volume_prefix(filename):
+        """Убирает 'Том N ' из имени файла."""
+        return re.sub(r'^Том\s+\d+\s+', '', filename)
+
+    def _get_docx_files(self):
+        """Возвращает список .docx файлов из папки-источника."""
+        src_dir = self.rename_src_edit.text()
+        if not src_dir or not os.path.isdir(src_dir):
+            return []
+        return sorted(glob.glob(os.path.join(src_dir, "*.docx")))
+
+    def _preview_rename(self):
+        """Показывает превью переименования в логе."""
+        self.rename_log.clear()
+        files = self._get_docx_files()
+        if not files:
+            self.rename_log.append("Нет .docx файлов в папке-источнике")
+            return
+
+        self.rename_log.append(f"<b>Найдено файлов: {len(files)}</b>")
+        self.rename_log.append("")
+        for filepath in files:
+            old_name = os.path.basename(filepath)
+            new_name = self._remove_volume_prefix(old_name)
+            if old_name != new_name:
+                self.rename_log.append(f"{old_name}  →  <b>{new_name}</b>")
+            else:
+                self.rename_log.append(f"{old_name}  (без изменений)")
+
+    def _do_rename(self):
+        """Копирует .docx файлы в папку-назначение, убирая 'Том N' из имени."""
+        self.rename_log.clear()
+        src_dir = self.rename_src_edit.text()
+        dst_dir = self.rename_dst_edit.text()
+
+        if not src_dir or not os.path.isdir(src_dir):
+            self.rename_log.append("<span style='color: #ff3050;'>Укажите папку-источник</span>")
+            return
+        if not dst_dir:
+            self.rename_log.append("<span style='color: #ff3050;'>Укажите папку-назначение</span>")
+            return
+
+        files = self._get_docx_files()
+        if not files:
+            self.rename_log.append("Нет .docx файлов в папке-источнике")
+            return
+
+        os.makedirs(dst_dir, exist_ok=True)
+        count = 0
+        for filepath in files:
+            old_name = os.path.basename(filepath)
+            new_name = self._remove_volume_prefix(old_name)
+            dst_path = os.path.join(dst_dir, new_name)
+            try:
+                shutil.copy2(filepath, dst_path)
+                count += 1
+            except Exception as e:
+                self.rename_log.append(
+                    f"<span style='color: #ff3050;'>Ошибка: {old_name} — {e}</span>"
+                )
+
+        self.rename_log.append(f"<b>Скопировано файлов: {count} из {len(files)}</b>")
+
     def get_selected_formats(self) -> List[str]:
-        """Возвращает список выбранных форматов"""
-        return [
-            format_name
-            for format_name, checkbox in self.format_checkboxes.items()
-            if checkbox.isChecked()
-        ]
+        """Возвращает список выбранных форматов (только DOCX)"""
+        return ["DOCX"]
 
     def get_save_directory(self) -> str:
         """Возвращает выбранный каталог для сохранения"""
@@ -213,12 +326,13 @@ class SettingsWidget(QWidget):
             if checkbox is not None:
                 chain.append(checkbox)
 
-        for key in ["EPUB", "FB2", "HTML", "TXT"]:
-            checkbox = self.format_checkboxes.get(key)
-            if checkbox is not None:
-                chain.append(checkbox)
-
         chain.append(self.path_edit)
         chain.append(self.browse_button)
         chain.append(self.download_button)
-        return chain 
+        chain.append(self.rename_src_edit)
+        chain.append(self.rename_src_button)
+        chain.append(self.rename_dst_edit)
+        chain.append(self.rename_dst_button)
+        chain.append(self.preview_rename_button)
+        chain.append(self.rename_button)
+        return chain

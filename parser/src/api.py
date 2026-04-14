@@ -78,13 +78,19 @@ class RanobeLibAPI:
         return self._retry_request(self._perform_request, url, params)
 
     def extract_slug_from_url(self, url: str) -> Optional[str]:
-        """Извлечение slug из URL новеллы."""
+        """Извлечение slug из URL новеллы (только для ranobelib)."""
         parsed_url = urlparse(url)
         path_parts = parsed_url.path.strip("/").split("/")
 
         if len(path_parts) >= 3 and path_parts[0] == "ru" and path_parts[1] == "book":
             return path_parts[2]
         return None
+
+    @staticmethod
+    def detect_site(url: str) -> Optional[str]:
+        """Определение сайта по домену URL."""
+        from .scrapers.site_detector import detect_site
+        return detect_site(url)
 
     def get_novel_info(self, slug: str) -> Dict[str, Any]:
         """Получение информации о новелле."""
