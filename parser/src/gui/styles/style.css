@@ -9,7 +9,7 @@ QWidget {
 /* Стили для кнопок */
 QPushButton {
     background-color: #111111;
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
     border-radius: 4px;
     padding: 5px 10px;
     color: #0070ff;
@@ -17,7 +17,7 @@ QPushButton {
 
 QPushButton:hover {
     background-color: #0a0a1a;
-    border-color: #3399ff;
+    border-color: #ffffff;
     color: #3399ff;
 }
 
@@ -28,7 +28,7 @@ QPushButton:pressed {
 QPushButton:disabled {
     background-color: #0a0a0a;
     color: #404040;
-    border-color: #222222;
+    border-color: #333333;
 }
 
 /* Стили для кнопки загрузки внутри адресной строки */
@@ -50,7 +50,7 @@ QToolButton#loadButton:pressed {
 /* Стили для полей ввода */
 QLineEdit {
     background-color: #0a0a0a;
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
     border-radius: 4px;
     padding: 4px;
     color: #e0e0e0;
@@ -59,18 +59,18 @@ QLineEdit {
 }
 
 QLineEdit:focus {
-    border-color: #3399ff;
+    border-color: #ffffff;
 }
 
 QLineEdit:disabled {
     background-color: #0a0a0a;
     color: #404040;
-    border-color: #222222;
+    border-color: #333333;
 }
 
 /* Стили для групп */
 QGroupBox {
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
     border-radius: 4px;
     margin-top: 1em;
     padding-top: 0.7em;
@@ -94,7 +94,7 @@ QCheckBox {
 QCheckBox::indicator {
     width: 13px;
     height: 13px;
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
     border-radius: 3px;
     background-color: #0a0a0a;
 }
@@ -105,12 +105,12 @@ QCheckBox::indicator:checked {
 }
 
 QCheckBox::indicator:hover {
-    border-color: #3399ff;
+    border-color: #ffffff;
 }
 
 QCheckBox::indicator:disabled {
     background-color: #111111;
-    border-color: #222222;
+    border-color: #333333;
 }
 
 QCheckBox::indicator:checked:disabled {
@@ -166,7 +166,7 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
 /* Стили для меню */
 QMenu {
     background-color: #0a0a0a;
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
     border-radius: 4px;
     padding: 2px;
 }
@@ -187,7 +187,7 @@ QMenu::item:selected {
 /* Стили для меню авторизации */
 QMenu#authMenu {
     border-radius: 6px;
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
     padding: 5px;
 }
 
@@ -211,7 +211,7 @@ QToolBar {
 QTreeView {
     background-color: #0a0a0a;
     alternate-background-color: #0f0f0f;
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
     border-radius: 4px;
 }
 
@@ -229,14 +229,14 @@ QHeaderView::section {
     background-color: #0a0a0a;
     color: #0070ff;
     padding: 4px;
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
 }
 
 /* Стили для текстовых полей */
 QTextEdit {
     background-color: #0a0a0a;
     color: #e0e0e0;
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
     border-radius: 4px;
     selection-background-color: #0070ff;
     selection-color: #000000;
@@ -244,7 +244,7 @@ QTextEdit {
 
 /* Стили для прогресс-бара — градиент от чёрного к синему */
 QProgressBar {
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
     border-radius: 4px;
     text-align: center;
     background-color: #0a0a0a;
@@ -279,7 +279,7 @@ QProgressBar::chunk {
 
 #downloadButton:disabled {
     background-color: #0a0a0a;
-    border-color: #222222;
+    border-color: #333333;
     color: #404040;
 }
 
@@ -307,14 +307,14 @@ QDialog {
 
 /* Стили для рамки контента */
 QFrame#contentFrame {
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
     border-radius: 4px;
 }
 
-/* Стили для разделителя — тонкие, синие */
+/* Стили для разделителя — тонкие, белые */
 QSplitter::handle {
     border: none;
-    background-color: #0070ff;
+    background-color: #ffffff;
 }
 
 QSplitter::handle:horizontal {
@@ -326,7 +326,7 @@ QSplitter::handle:vertical {
 }
 
 QSplitter::handle:hover {
-    background-color: #3399ff;
+    background-color: #ffffff;
 }
 
 /* Стили для информационной панели новеллы */
@@ -391,7 +391,7 @@ QLabel {
 
 /* Секция переименования файлов */
 #renameFrame {
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
     border-radius: 4px;
 }
 
@@ -413,13 +413,13 @@ QLabel {
 #previewRenameButton {
     background-color: #111111;
     color: #0070ff;
-    border: 1px solid #0070ff;
+    border: 1px solid #ffffff;
     border-radius: 4px;
     padding: 6px 12px;
 }
 
 #previewRenameButton:hover {
     background-color: #0a0a1a;
-    border-color: #3399ff;
+    border-color: #ffffff;
     color: #3399ff;
 }

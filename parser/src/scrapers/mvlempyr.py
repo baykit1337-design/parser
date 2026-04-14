@@ -1,155 +1,241 @@
 """
-Скрапер для mvlempyr.io
+Скрапер для mvlempyr.io (My Virtual Library Empire).
+
+URL-паттерны:
+- Книга:    https://www.mvlempyr.io/novel/{slug}
+- Глава:    https://www.mvlempyr.io/chapter/{book_id}-{chapter_number}
+
+Известные CSS-селекторы (из сообщества WebToEpub/LNReader):
+- Контент главы: #chapter (основной), #chapter-content (резерв)
+- Заголовок:     h1 на странице главы
+- Список глав:   ссылки на странице книги с href="/chapter/..."
 """
 
+import json
 import re
-import time
-from urllib.parse import urlparse, urljoin
+from typing import List, Optional
+from urllib.parse import urljoin, urlparse
+
+from bs4 import BeautifulSoup
 
 from .base import BaseScraper
 
 
 class MvlempyrScraper(BaseScraper):
-    """Скрапер для сайта mvlempyr.io"""
+    """Скрапер для mvlempyr.io."""
 
-    def _setup_headers(self):
-        self.session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-        })
+    BASE = "https://www.mvlempyr.io"
 
-    def _get_base_url(self, url):
-        """Извлекает базовый URL сайта."""
+    # --- helpers --------------------------------------------------------
+
+    def _get_base_url(self, url: str) -> str:
         parsed = urlparse(url)
-        return f"{parsed.scheme}://{parsed.hostname}"
+        if parsed.hostname:
+            return f"{parsed.scheme or 'https'}://{parsed.hostname}"
+        return self.BASE
 
-    def get_book_info(self, url):
-        """Получение информации о книге с mvlempyr.io"""
+    def _extract_slug(self, url: str) -> Optional[str]:
+        match = re.search(r"/novel/([^/?#]+)", url)
+        return match.group(1) if match else None
+
+    def _is_chapter_href(self, href: str) -> bool:
+        """Ссылка вида /chapter/5663-1."""
+        return bool(re.search(r"/chapter/\d+-\d+(?:[/?#]|$)", href))
+
+    @staticmethod
+    def _chapter_key(href: str):
+        """Ключ сортировки по числу главы (последнее число в пути)."""
+        match = re.search(r"/chapter/(\d+)-(\d+)", href)
+        if not match:
+            return (0, 0)
+        return (int(match.group(1)), int(match.group(2)))
+
+    @staticmethod
+    def _clean_title(text: str) -> str:
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    # --- public API -----------------------------------------------------
+
+    def get_book_info(self, url: str) -> dict:
+        """Получение информации о книге."""
         soup = self._get_soup(url)
         if not soup:
             return {"title": "Без названия", "url": url}
 
-        title_tag = soup.find("h1") or soup.find("h2")
-        title = title_tag.get_text(strip=True) if title_tag else "Без названия"
+        title = None
+        for selector in ("h1", ".novel-title", ".entry-title", "title"):
+            tag = soup.select_one(selector)
+            if tag:
+                text = self._clean_title(tag.get_text())
+                if text and len(text) > 2:
+                    title = text
+                    break
+
+        # Обрезать хвост " | MVLEMPYR" из <title>
+        if title:
+            title = re.sub(r"\s*[\|\-–—]\s*MVLEMPYR.*$", "", title, flags=re.IGNORECASE)
 
         return {
-            "title": title,
+            "title": title or "Без названия",
             "url": url,
+            "slug": self._extract_slug(url),
         }
 
-    def get_chapters_list(self, url):
-        """Получение списка глав с mvlempyr.io"""
+    def get_chapters_list(self, url: str) -> List[dict]:
+        """Получение списка глав со страницы книги."""
         soup = self._get_soup(url)
         if not soup:
             return []
 
-        base_url = self._get_base_url(url)
+        base = self._get_base_url(url)
+
+        # Собираем все ссылки вида /chapter/{id}-{num}
+        raw_links = []
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            if not href:
+                continue
+            if not self._is_chapter_href(href):
+                continue
+            full_url = urljoin(base, href)
+            text = self._clean_title(a.get_text())
+            raw_links.append((full_url, text))
+
+        # Удаляем дубликаты, сохраняя первый встретившийся текст
+        seen = {}
+        for full_url, text in raw_links:
+            if full_url not in seen:
+                seen[full_url] = text
+
+        # Сортируем по номеру главы (последнее число в URL)
+        sorted_urls = sorted(seen.keys(), key=self._chapter_key)
+
         chapters = []
+        for i, full_url in enumerate(sorted_urls, start=1):
+            text = seen[full_url] or ""
 
-        toc_link = soup.find("a", string=re.compile(r"оглавление|table of contents|chapters", re.I))
-        if toc_link and toc_link.get("href"):
-            toc_url = urljoin(base_url, toc_link["href"])
-            toc_soup = self._get_soup(toc_url)
-            if toc_soup:
-                soup = toc_soup
+            # Пытаемся извлечь номер главы из URL
+            m = re.search(r"/chapter/\d+-(\d+)", full_url)
+            ch_number = m.group(1) if m else str(i)
 
-        chapter_links = soup.select("a[href]")
-
-        seen_urls = set()
-        chapter_candidates = []
-        for link in chapter_links:
-            href = link.get("href", "")
-            text = link.get_text(strip=True)
-            if not href or not text:
-                continue
-
-            full_url = urljoin(base_url, href)
-
-            is_chapter = bool(
-                re.search(r'chapter|глава|ch[\-_\.]?\d', text + href, re.IGNORECASE)
-            )
-
-            if not is_chapter:
-                continue
-            if full_url in seen_urls:
-                continue
-            seen_urls.add(full_url)
-
-            chapter_candidates.append({"text": text, "url": full_url})
-
-        for i, candidate in enumerate(chapter_candidates):
-            name = candidate["text"]
-            ch_match = re.search(r'(?:chapter|глава|ch)[\s.\-_]*(\d+)', name, re.IGNORECASE)
-            ch_number = ch_match.group(1) if ch_match else str(i + 1)
-
-            ch_name = re.sub(
-                r'^(?:chapter|глава|ch)[\s.\-_]*\d+[\s.\-:]*',
-                '', name, flags=re.IGNORECASE
+            # Имя главы из текста ссылки, без префикса "Chapter N"
+            name = re.sub(
+                r"^\s*(?:chapter|ch\.?|глава)\s*\d+[\s:.\-–—]*",
+                "",
+                text,
+                flags=re.IGNORECASE,
             ).strip()
 
             chapters.append({
                 "number": ch_number,
-                "name": ch_name or name,
-                "url": candidate["url"],
+                "name": name or text or f"Chapter {ch_number}",
+                "url": full_url,
                 "volume": "1",
             })
 
         return chapters
 
-    def get_chapter_text(self, chapter_url):
-        """Получение текста главы с mvlempyr.io"""
-        time.sleep(0.5)
-        soup = self._get_soup(chapter_url)
-        if not soup:
-            return ""
+    # --- chapter content ------------------------------------------------
 
-        content_selectors = [
+    def _extract_content_div(self, soup: BeautifulSoup):
+        """Находит элемент с текстом главы."""
+        # Приоритетные селекторы для mvlempyr
+        selectors = [
+            "#chapter",
+            "#chapter-content",
+            "div[id='chapter']",
+            "div[id^='chapter-']",
             ".chapter-content",
             ".entry-content",
-            ".post-content",
-            ".text-content",
             ".reading-content",
+            ".post-content",
             "article .content",
             "article",
-            ".chapter-body",
-            "#chapter-content",
             "main",
         ]
+        for selector in selectors:
+            node = soup.select_one(selector)
+            if node and len(node.get_text(strip=True)) > 100:
+                return node
+        return None
 
-        content_div = None
-        for selector in content_selectors:
-            content_div = soup.select_one(selector)
-            if content_div:
-                break
-
-        if not content_div:
+    def _extract_from_next_data(self, soup: BeautifulSoup) -> str:
+        """Попытка извлечь текст главы из __NEXT_DATA__ (Next.js)."""
+        script = soup.find("script", {"id": "__NEXT_DATA__"})
+        if not script or not script.string:
+            return ""
+        try:
+            data = json.loads(script.string)
+        except Exception:
             return ""
 
-        for tag in content_div.find_all(["script", "style", "img", "noscript", "iframe", "nav"]):
-            tag.decompose()
+        # Рекурсивный поиск поля с HTML-контентом главы
+        def walk(obj):
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    key_lower = str(key).lower()
+                    if key_lower in ("content", "html", "body", "chaptercontent", "chapter_content"):
+                        if isinstance(value, str) and len(value) > 200:
+                            return value
+                    result = walk(value)
+                    if result:
+                        return result
+            elif isinstance(obj, list):
+                for item in obj:
+                    result = walk(item)
+                    if result:
+                        return result
+            return None
 
-        for ad in content_div.find_all(class_=re.compile(r"ad|banner|promo|nav|footer|header", re.I)):
+        html = walk(data)
+        if not html:
+            return ""
+
+        inner = BeautifulSoup(html, "html.parser")
+        return self._node_to_text(inner)
+
+    @staticmethod
+    def _node_to_text(node) -> str:
+        # Удаляем служебные элементы
+        for tag in node.find_all(["script", "style", "img", "noscript", "iframe", "nav", "button"]):
+            tag.decompose()
+        for ad in node.find_all(class_=re.compile(r"ad|banner|promo|share|social", re.I)):
             ad.decompose()
 
         paragraphs = []
-        for p in content_div.find_all("p"):
-            text = p.get_text(strip=True)
+        for p in node.find_all(["p", "div"]):
+            # Пропускаем контейнеры, содержащие другие параграфы
+            if p.find("p") or p.find("div"):
+                continue
+            text = p.get_text(" ", strip=True)
             if text and len(text) > 1:
                 paragraphs.append(text)
 
         if not paragraphs:
-            text = content_div.get_text(separator="\n")
+            text = node.get_text("\n", strip=True)
             for line in text.splitlines():
                 line = line.strip()
                 if line and len(line) > 1:
                     paragraphs.append(line)
 
         return "\n".join(paragraphs)
+
+    def get_chapter_text(self, chapter_url: str) -> str:
+        """Получение текста одной главы."""
+        soup = self._get_soup(chapter_url)
+        if not soup:
+            return ""
+
+        content_div = self._extract_content_div(soup)
+        if content_div:
+            text = self._node_to_text(content_div)
+            if text.strip():
+                return text
+
+        # Фолбэк: вытащить из __NEXT_DATA__
+        text = self._extract_from_next_data(soup)
+        if text.strip():
+            return text
+
+        return ""
