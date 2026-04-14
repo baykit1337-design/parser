@@ -495,7 +495,7 @@ class MainWindow(QMainWindow):
         self.statusbar.showMessage("Ошибка загрузки информации о новелле", 5000)
         if self.novel_title_label:
             self.novel_title_label.setText(error_message)
-            self.novel_title_label.setStyleSheet("color: #ff3050;")
+            self.novel_title_label.setStyleSheet("color: #ff0040;")
         if self.info_icon_label:
             self.info_icon_label.setVisible(False)
 

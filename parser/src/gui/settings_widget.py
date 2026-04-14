@@ -91,7 +91,7 @@ class SettingsWidget(QWidget):
         settings_layout.setSpacing(3)
 
         format_label = QLabel("Формат: DOCX (одна глава = один файл)")
-        format_label.setStyleSheet("margin-top: 5px; color: #00f0ff;")
+        format_label.setStyleSheet("margin-top: 5px; color: #0070ff;")
         settings_layout.addWidget(format_label)
 
         path_label = QLabel("Каталог для сохранения:")
@@ -274,10 +274,10 @@ class SettingsWidget(QWidget):
         dst_dir = self.rename_dst_edit.text()
 
         if not src_dir or not os.path.isdir(src_dir):
-            self.rename_log.append("<span style='color: #ff3050;'>Укажите папку-источник</span>")
+            self.rename_log.append("<span style='color: #ff0040;'>Укажите папку-источник</span>")
             return
         if not dst_dir:
-            self.rename_log.append("<span style='color: #ff3050;'>Укажите папку-назначение</span>")
+            self.rename_log.append("<span style='color: #ff0040;'>Укажите папку-назначение</span>")
             return
 
         files = self._get_docx_files()
@@ -296,7 +296,7 @@ class SettingsWidget(QWidget):
                 count += 1
             except Exception as e:
                 self.rename_log.append(
-                    f"<span style='color: #ff3050;'>Ошибка: {old_name} — {e}</span>"
+                    f"<span style='color: #ff0040;'>Ошибка: {old_name} — {e}</span>"
                 )
 
         self.rename_log.append(f"<b>Скопировано файлов: {count} из {len(files)}</b>")

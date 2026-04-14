@@ -110,6 +110,17 @@ class DownloadWorker(QThread):
         docx_creator = DocxCreator(self.api, self.parser, self.image_handler)
         total_volumes = docx_creator.get_total_volume_count(self.novel_info)
 
+        # Создаём подпапку с названием книги
+        book_title = (
+            self.novel_info.get("rus_name")
+            or self.novel_info.get("eng_name")
+            or "Новелла"
+        )
+        safe_book_title = re.sub(r'[\\/*?:"<>|]', "", book_title).strip()
+        chapter_save_dir = os.path.join(self.save_dir, safe_book_title)
+        os.makedirs(chapter_save_dir, exist_ok=True)
+        self.progress_update.emit(f"Папка: {safe_book_title}/", 0)
+
         for i, chapter_data in enumerate(self.selected_chapters):
             if self.is_cancelled:
                 return
@@ -149,7 +160,7 @@ class DownloadWorker(QThread):
 
             try:
                 filepath = docx_creator.create_single_chapter(
-                    prepared_chapter, self.novel_info, self.save_dir, total_volumes
+                    prepared_chapter, self.novel_info, chapter_save_dir, total_volumes
                 )
                 self.created_files.append(filepath)
                 self.progress_update.emit(
@@ -227,7 +238,13 @@ class ExternalDownloadWorker(QThread):
             scraper = MvlempyrScraper()
 
         total = len(self.chapters)
-        os.makedirs(self.save_dir, exist_ok=True)
+
+        # Создаём подпапку с названием книги
+        book_title = self.book_info.get("title", "Новелла")
+        safe_book_title = re.sub(r'[\\/*?:"<>|]', "", book_title).strip()
+        chapter_save_dir = os.path.join(self.save_dir, safe_book_title)
+        os.makedirs(chapter_save_dir, exist_ok=True)
+        self.progress_update.emit(f"Папка: {safe_book_title}/", 0)
 
         for i, chapter in enumerate(self.chapters):
             if self.is_cancelled:
@@ -272,10 +289,10 @@ class ExternalDownloadWorker(QThread):
                     if line:
                         doc.add_paragraph(line)
 
-                filepath = os.path.join(self.save_dir, f"{safe_title}.docx")
+                filepath = os.path.join(chapter_save_dir, f"{safe_title}.docx")
                 counter = 1
                 while os.path.exists(filepath):
-                    filepath = os.path.join(self.save_dir, f"{safe_title} ({counter}).docx")
+                    filepath = os.path.join(chapter_save_dir, f"{safe_title} ({counter}).docx")
                     counter += 1
 
                 doc.save(filepath)
@@ -477,7 +494,7 @@ class DownloadDialog(QDialog):
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(self.save_dir)))
 
     def _on_download_error(self, error_message: str):
-        self.log_text.append(f"<span style='color: #ff3050;'><b>Ошибка:</b> {error_message}</span>")
+        self.log_text.append(f"<span style='color: #ff0040;'><b>Ошибка:</b> {error_message}</span>")
 
         if self.download_worker:
             elapsed = time.time() - self.download_worker.start_time
@@ -654,7 +671,7 @@ class ExternalDownloadDialog(QDialog):
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(self.save_dir)))
 
     def _on_download_error(self, error_message: str):
-        self.log_text.append(f"<span style='color: #ff3050;'><b>Ошибка:</b> {error_message}</span>")
+        self.log_text.append(f"<span style='color: #ff0040;'><b>Ошибка:</b> {error_message}</span>")
 
         if self.download_worker:
             elapsed = time.time() - self.download_worker.start_time
