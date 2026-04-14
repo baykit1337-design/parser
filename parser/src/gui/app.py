@@ -24,7 +24,7 @@ def run_gui():
     bg_color = QColor(0, 0, 0)
     disabled_color = QColor(64, 64, 64)
     text_color = QColor(224, 224, 224)
-    cyan_color = QColor(0, 240, 255)
+    blue_color = QColor(0, 112, 255)
 
     dark_palette.setColor(QPalette.ColorRole.Window, bg_color)
     dark_palette.setColor(QPalette.ColorRole.WindowText, text_color)
@@ -34,10 +34,10 @@ def run_gui():
     dark_palette.setColor(QPalette.ColorRole.ToolTipText, text_color)
     dark_palette.setColor(QPalette.ColorRole.Text, text_color)
     dark_palette.setColor(QPalette.ColorRole.Button, QColor(17, 17, 17))
-    dark_palette.setColor(QPalette.ColorRole.ButtonText, cyan_color)
-    dark_palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 48, 80))
-    dark_palette.setColor(QPalette.ColorRole.Link, cyan_color)
-    dark_palette.setColor(QPalette.ColorRole.Highlight, cyan_color)
+    dark_palette.setColor(QPalette.ColorRole.ButtonText, blue_color)
+    dark_palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 0, 64))
+    dark_palette.setColor(QPalette.ColorRole.Link, blue_color)
+    dark_palette.setColor(QPalette.ColorRole.Highlight, blue_color)
     dark_palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
 
     dark_palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, disabled_color)
