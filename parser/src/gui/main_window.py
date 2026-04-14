@@ -1,5 +1,5 @@
 """
-Главное окно приложения RanobeLIB
+Главное окно приложения RanobeLIB Downloader
 """
 
 import base64
@@ -29,14 +29,15 @@ from ..api import RanobeLibAPI
 from ..auth import RanobeLibAuth
 from ..img import ImageHandler
 from ..parser import RanobeLibParser
+from ..scrapers.site_detector import detect_site, SITE_RANOBELIB, SITE_WEBNOVEL, SITE_MVLEMPYR
 from .auth_manager import AuthManager
 from .chapters_widget import ChaptersWidget
-from .download_dialog import DownloadDialog
+from .download_dialog import DownloadDialog, ExternalDownloadDialog
 from .utils import load_stylesheet, show_error_message
 
 
 class NovelInfoWorker(QThread):
-    """Рабочий поток для загрузки информации о новелле"""
+    """Рабочий поток для загрузки информации о новелле (ranobelib)"""
 
     finished = pyqtSignal(dict, list)
     error = pyqtSignal(str)
@@ -72,6 +73,39 @@ class NovelInfoWorker(QThread):
             self.error.emit(str(e))
 
 
+class ExternalNovelInfoWorker(QThread):
+    """Рабочий поток для загрузки информации с внешних сайтов (webnovel, mvlempyr)"""
+
+    finished = pyqtSignal(dict, list, str)  # book_info, chapters, site_type
+    error = pyqtSignal(str)
+
+    def __init__(self, url: str, site_type: str):
+        super().__init__()
+        self.url = url
+        self.site_type = site_type
+
+    def run(self):
+        try:
+            if self.site_type == SITE_WEBNOVEL:
+                from ..scrapers.webnovel import WebnovelScraper
+                scraper = WebnovelScraper()
+            elif self.site_type == SITE_MVLEMPYR:
+                from ..scrapers.mvlempyr import MvlempyrScraper
+                scraper = MvlempyrScraper()
+            else:
+                raise ValueError(f"Неизвестный сайт: {self.site_type}")
+
+            book_info = scraper.get_book_info(self.url)
+            chapters = scraper.get_chapters_list(self.url)
+
+            if not chapters:
+                raise ValueError("Не удалось загрузить список глав")
+
+            self.finished.emit(book_info, chapters, self.site_type)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     """Главное окно приложения"""
 
@@ -87,6 +121,9 @@ class MainWindow(QMainWindow):
 
         self.novel_info: Optional[Dict[str, Any]] = None
         self.chapters_data: List[Dict[str, Any]] = []
+        self.current_site_type: Optional[str] = None
+        self.external_book_info: Optional[Dict[str, Any]] = None
+        self.external_chapters: List[Dict[str, Any]] = []
         self.load_button: Optional[QToolButton] = None
         self.auth_button: Optional[QPushButton] = None
         self.novel_info_bar: Optional[QWidget] = None
@@ -96,6 +133,7 @@ class MainWindow(QMainWindow):
         self._cover_thumb_cache: Dict[str, str] = {}
         self._initial_layout_done = False
         self.novel_info_worker = None
+        self.external_info_worker = None
 
         self.setWindowTitle(f"RanobeLIB Downloader v{__version__}")
         self.setMinimumSize(700, 500)
@@ -149,7 +187,9 @@ class MainWindow(QMainWindow):
         address_layout.setContentsMargins(10, 10, 10, 0)
 
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("https://ranobelib.me/ru/book/...")
+        self.url_input.setPlaceholderText(
+            "ranobelib.me / webnovel.com / mvlempyr.io — вставьте ссылку"
+        )
 
         base64_icon = "iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAY0lEQVR4nO3UsQmEYAyA0X8SXUQLB3ACcQ13FCyvPnAP4Ylop4IHEQ7xg7SvCCQpvZ2FDnWKCh9MaKLADN8NbV90H0r0GC7OaG1BqyOwCAV/CXnYHgVj2X9id51eF/oc0mOaAR2mDe1O9aKOAAAAAElFTkSuQmCC"
         pixmap = QPixmap()
@@ -163,17 +203,17 @@ class MainWindow(QMainWindow):
         self.load_button.setVisible(False)
         self.load_button.setCursor(Qt.CursorShape.ArrowCursor)
         self.load_button.setFixedSize(22, 22)
-        
+
         def position_load_button():
             button_y = (self.url_input.height() - self.load_button.height()) // 2
             button_x = self.url_input.width() - self.load_button.width() - 3
             self.load_button.move(button_x, button_y)
-        
+
         self.url_input.resizeEvent = lambda event: (
             QLineEdit.resizeEvent(self.url_input, event),
             position_load_button()
         )[1]
-        
+
         self._position_load_button = position_load_button
 
         address_layout.addWidget(self.url_input)
@@ -207,7 +247,7 @@ class MainWindow(QMainWindow):
         font.setBold(True)
         self.novel_title_label.setFont(font)
 
-        self.info_icon_label = QLabel("🛈")
+        self.info_icon_label = QLabel()
         self.info_icon_label.setObjectName("novelInfoIcon")
         self.info_icon_label.setVisible(False)
 
@@ -273,23 +313,38 @@ class MainWindow(QMainWindow):
             self,
             "О программе",
             f"<h3>RanobeLIB Downloader v{__version__}</h3>"
-            "<p>Программа для скачивания новелл с сайта RanobeLIB.</p>"
-            "<p><a href='https://github.com/zeroma25/ranobelib-downloader'>GitHub</a></p>",
+            "<p>Программа для скачивания новелл.</p>"
+            "<p>Поддерживаемые сайты: ranobelib.me, webnovel.com, mvlempyr.io</p>",
         )
 
     def _load_novel(self):
-        """Загрузка информации о новелле по URL"""
+        """Загрузка информации о новелле по URL — автодетект по домену"""
         url = self.url_input.text().strip()
         if not url:
             show_error_message(self, "Ошибка", "Введите URL новеллы")
             return
 
+        site_type = detect_site(url)
+
+        if site_type == SITE_RANOBELIB:
+            self._load_ranobelib(url)
+        elif site_type in (SITE_WEBNOVEL, SITE_MVLEMPYR):
+            self._load_external(url, site_type)
+        else:
+            show_error_message(
+                self, "Ошибка",
+                "Неизвестный сайт. Поддерживаются: ranobelib.me, webnovel.com, mvlempyr.io"
+            )
+
+    def _load_ranobelib(self, url: str):
+        """Загрузка информации с ranobelib.me"""
         slug = self.api.extract_slug_from_url(url)
         if not slug:
-            show_error_message(self, "Ошибка", "Неверный формат ссылки на новеллу")
+            show_error_message(self, "Ошибка", "Неверный формат ссылки на новеллу RanobeLIB")
             return
 
-        self.statusbar.showMessage("Загрузка информации о новелле...")
+        self.current_site_type = SITE_RANOBELIB
+        self.statusbar.showMessage("Загрузка информации о новелле (RanobeLIB)...")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 
         is_authenticated = self.auth_manager.is_authenticated()
@@ -298,14 +353,50 @@ class MainWindow(QMainWindow):
         self.novel_info_worker.error.connect(self._on_novel_info_error)
         self.novel_info_worker.start()
 
+    def _load_external(self, url: str, site_type: str):
+        """Загрузка информации с внешних сайтов"""
+        site_name = "WebNovel" if site_type == SITE_WEBNOVEL else "MvlEmpyr"
+        self.current_site_type = site_type
+        self.statusbar.showMessage(f"Загрузка информации ({site_name})...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+
+        self.external_info_worker = ExternalNovelInfoWorker(url, site_type)
+        self.external_info_worker.finished.connect(self._on_external_info_loaded)
+        self.external_info_worker.error.connect(self._on_novel_info_error)
+        self.external_info_worker.start()
+
+    def _on_external_info_loaded(self, book_info, chapters, site_type):
+        """Обработчик загрузки информации с внешнего сайта"""
+        QApplication.restoreOverrideCursor()
+
+        self.external_book_info = book_info
+        self.external_chapters = chapters
+        self.novel_info = None
+        self.chapters_data = []
+
+        title = book_info.get("title", "Без названия")
+        site_name = "WebNovel" if site_type == SITE_WEBNOVEL else "MvlEmpyr"
+
+        if self.novel_title_label:
+            self.novel_title_label.setText(f"{title} [{site_name}]")
+            self.novel_title_label.setStyleSheet("")
+        if self.info_icon_label:
+            self.info_icon_label.setVisible(False)
+
+        self.chapters_widget.clear()
+        self.statusbar.showMessage(
+            f"Загружено: {title} — {len(chapters)} глав ({site_name})", 5000
+        )
+
     def _on_novel_info_loaded(self, novel_info, chapters_data):
         """Обработчик успешной загрузки информации о новелле"""
         QApplication.restoreOverrideCursor()
         self.novel_info = novel_info
         self.chapters_data = chapters_data
+        self.external_book_info = None
+        self.external_chapters = []
 
         def clean_title(t_raw: Optional[str]) -> str:
-            """Очищает название от HTML-сущностей и суффикса (Новелла)/(Novel)"""
             if not t_raw:
                 return ""
             t_decoded = self.parser.decode_html_entities(t_raw)
@@ -364,7 +455,7 @@ class MainWindow(QMainWindow):
                     thumb_b64 = base64.b64encode(response.content).decode("ascii")
                     self._cover_thumb_cache[cover_url] = thumb_b64
                 except Exception as e:
-                    print(f"⚠️ Не удалось загрузить миниатюру обложки: {e}")
+                    print(f"Не удалось загрузить миниатюру обложки: {e}")
                     thumb_b64 = None
 
         tooltip_html = ""
@@ -404,7 +495,7 @@ class MainWindow(QMainWindow):
         self.statusbar.showMessage("Ошибка загрузки информации о новелле", 5000)
         if self.novel_title_label:
             self.novel_title_label.setText(error_message)
-            self.novel_title_label.setStyleSheet("color: #e74c3c;")
+            self.novel_title_label.setStyleSheet("color: #ff3050;")
         if self.info_icon_label:
             self.info_icon_label.setVisible(False)
 
@@ -412,6 +503,29 @@ class MainWindow(QMainWindow):
 
     def _start_download(self):
         """Начало процесса загрузки выбранных глав"""
+        settings_widget = self.chapters_widget.settings_widget
+        save_dir = settings_widget.get_save_directory()
+        if not save_dir:
+            save_dir = QFileDialog.getExistingDirectory(self, "Выберите каталог для сохранения")
+            if not save_dir:
+                return
+            settings_widget.set_save_directory(save_dir)
+
+        options = settings_widget.get_options()
+
+        # Внешний сайт (webnovel/mvlempyr)
+        if self.current_site_type in (SITE_WEBNOVEL, SITE_MVLEMPYR) and self.external_chapters:
+            dialog = ExternalDownloadDialog(
+                self.external_book_info,
+                self.external_chapters,
+                self.current_site_type,
+                save_dir,
+                self,
+            )
+            dialog.exec()
+            return
+
+        # RanobeLIB
         if not self.novel_info or not self.chapters_data:
             show_error_message(self, "Ошибка", "Сначала загрузите информацию о новелле")
             return
@@ -421,20 +535,7 @@ class MainWindow(QMainWindow):
             show_error_message(self, "Ошибка", "Не выбрано ни одной главы для загрузки")
             return
 
-        settings_widget = self.chapters_widget.settings_widget
         selected_formats = settings_widget.get_selected_formats()
-        if not selected_formats:
-            show_error_message(self, "Ошибка", "Не выбран ни один формат для скачивания")
-            return
-
-        save_dir = settings_widget.get_save_directory()
-        if not save_dir:
-            save_dir = QFileDialog.getExistingDirectory(self, "Выберите каталог для сохранения")
-            if not save_dir:
-                return
-            settings_widget.set_save_directory(save_dir)
-
-        options = settings_widget.get_options()
 
         download_dialog = DownloadDialog(
             self.novel_info,
@@ -452,4 +553,4 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Обработка закрытия приложения"""
         self._save_settings()
-        super().closeEvent(event) 
+        super().closeEvent(event)
