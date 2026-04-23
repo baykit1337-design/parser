@@ -1,8 +1,8 @@
 beautifulsoup4
 cloudscraper
+curl_cffi
 deep-translator
 ebooklib
-httpx
 lxml
 Pillow
 PyQt6

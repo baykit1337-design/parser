@@ -1,10 +1,11 @@
 """
 Базовый класс для скраперов сторонних сайтов.
 
-Использует цепочку фолбэков для обхода защит:
-1. requests с браузерными заголовками
-2. cloudscraper (для CloudFlare)
-3. httpx (HTTP/2)
+Цепочка фолбэков для обхода защит:
+1. curl_cffi (имитация TLS-отпечатка браузера — главный обход CloudFlare)
+2. cloudscraper
+3. requests с браузерными заголовками
+4. мобильный User-Agent
 """
 
 import time
@@ -14,28 +15,38 @@ import requests
 from bs4 import BeautifulSoup
 
 try:
+    from curl_cffi import requests as cffi_requests  # type: ignore
+    HAS_CURL_CFFI = True
+except Exception:
+    HAS_CURL_CFFI = False
+
+try:
     import cloudscraper  # type: ignore
     HAS_CLOUDSCRAPER = True
 except Exception:
     HAS_CLOUDSCRAPER = False
 
-try:
-    import httpx  # type: ignore
-    HAS_HTTPX = True
-except Exception:
-    HAS_HTTPX = False
 
+DEFAULT_HEADERS = {
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+}
 
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
-)
-
-MOBILE_UA = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-    "Version/17.0 Mobile/15E148 Safari/604.1"
 )
 
 
@@ -44,105 +55,69 @@ class BaseScraper:
 
     def __init__(self):
         self.session = requests.Session()
+        self.session.headers.update(DEFAULT_HEADERS)
+        self.session.headers["User-Agent"] = DEFAULT_UA
         self._cloudscraper = None
-        self._httpx_client = None
         self._setup_headers()
 
-    def _default_headers(self, mobile: bool = False) -> dict:
-        return {
-            "User-Agent": MOBILE_UA if mobile else DEFAULT_UA,
-            "Accept": (
-                "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                "image/avif,image/webp,image/apng,*/*;q=0.8"
-            ),
-            "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-            "sec-ch-ua-mobile": "?1" if mobile else "?0",
-            "sec-ch-ua-platform": '"iOS"' if mobile else '"Windows"',
-        }
-
     def _setup_headers(self):
-        """Настройка заголовков по умолчанию."""
-        self.session.headers.update(self._default_headers())
+        """Переопределяется подклассами для дополнительных заголовков."""
+        pass
 
-    def _fetch_requests(self, url: str, timeout: int = 20) -> Optional[str]:
-        """Обычный requests-запрос."""
+    # --- fetch methods --------------------------------------------------
+
+    def _fetch_curl_cffi(self, url: str, timeout: int = 20) -> Optional[str]:
+        """curl_cffi с имитацией Chrome TLS-отпечатка."""
+        if not HAS_CURL_CFFI:
+            return None
         try:
-            response = self.session.get(url, timeout=timeout, allow_redirects=True)
-            if response.status_code == 200 and response.text:
-                return response.text
-        except requests.exceptions.RequestException:
+            r = cffi_requests.get(
+                url,
+                impersonate="chrome124",
+                timeout=timeout,
+                allow_redirects=True,
+                headers=dict(self.session.headers),
+            )
+            if r.status_code == 200 and r.text and len(r.text) > 200:
+                return r.text
+        except Exception:
             pass
         return None
 
     def _fetch_cloudscraper(self, url: str, timeout: int = 20) -> Optional[str]:
-        """Фолбэк через cloudscraper (обходит CloudFlare)."""
         if not HAS_CLOUDSCRAPER:
             return None
         try:
             if self._cloudscraper is None:
                 self._cloudscraper = cloudscraper.create_scraper(
-                    browser={"browser": "chrome", "platform": "windows", "mobile": False}
+                    browser={"browser": "chrome", "platform": "windows"}
                 )
-                # Пробрасываем заголовки из основной сессии
-                self._cloudscraper.headers.update(self.session.headers)
-            response = self._cloudscraper.get(url, timeout=timeout)
-            if response.status_code == 200 and response.text:
-                return response.text
+                self._cloudscraper.headers.update(dict(self.session.headers))
+            r = self._cloudscraper.get(url, timeout=timeout)
+            if r.status_code == 200 and r.text and len(r.text) > 200:
+                return r.text
         except Exception:
             pass
         return None
 
-    def _fetch_httpx(self, url: str, timeout: int = 20) -> Optional[str]:
-        """Фолбэк через httpx (HTTP/2)."""
-        if not HAS_HTTPX:
-            return None
+    def _fetch_requests(self, url: str, timeout: int = 20) -> Optional[str]:
         try:
-            if self._httpx_client is None:
-                self._httpx_client = httpx.Client(
-                    http2=True,
-                    headers=dict(self.session.headers),
-                    follow_redirects=True,
-                    timeout=timeout,
-                )
-            response = self._httpx_client.get(url)
-            if response.status_code == 200 and response.text:
-                return response.text
-        except Exception:
-            pass
-        return None
-
-    def _fetch_mobile(self, url: str, timeout: int = 20) -> Optional[str]:
-        """Запрос с мобильным User-Agent."""
-        try:
-            headers = self._default_headers(mobile=True)
-            response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-            if response.status_code == 200 and response.text:
-                return response.text
+            r = self.session.get(url, timeout=timeout, allow_redirects=True)
+            if r.status_code == 200 and r.text and len(r.text) > 200:
+                return r.text
         except Exception:
             pass
         return None
 
     def _fetch_html(self, url: str, retries: int = 2, delay: int = 2) -> Optional[str]:
         """
-        Цепочка фолбэков: requests → cloudscraper → httpx → mobile.
-        Возвращает HTML или None.
+        Цепочка: curl_cffi → cloudscraper → requests.
         """
         for attempt in range(retries):
             for fetcher in (
-                self._fetch_requests,
+                self._fetch_curl_cffi,
                 self._fetch_cloudscraper,
-                self._fetch_httpx,
-                self._fetch_mobile,
+                self._fetch_requests,
             ):
                 html = fetcher(url)
                 if html:
@@ -153,12 +128,30 @@ class BaseScraper:
         print(f"Ошибка загрузки {url}: все фолбэки исчерпаны")
         return None
 
+    def _head_ok(self, url: str, timeout: int = 10) -> bool:
+        """Проверяет доступность URL через HEAD (или GET маленький)."""
+        if HAS_CURL_CFFI:
+            try:
+                r = cffi_requests.head(
+                    url, impersonate="chrome124", timeout=timeout, allow_redirects=True,
+                )
+                return r.status_code == 200
+            except Exception:
+                pass
+        try:
+            r = self.session.head(url, timeout=timeout, allow_redirects=True)
+            return r.status_code == 200
+        except Exception:
+            pass
+        return False
+
     def _get_soup(self, url: str, retries: int = 2, delay: int = 2) -> Optional[BeautifulSoup]:
-        """Загружает страницу и возвращает BeautifulSoup объект."""
         html = self._fetch_html(url, retries=retries, delay=delay)
         if not html:
             return None
         return BeautifulSoup(html, "html.parser")
+
+    # --- public API (переопределяются) ----------------------------------
 
     def get_book_info(self, url):
         raise NotImplementedError
