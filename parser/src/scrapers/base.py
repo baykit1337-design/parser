@@ -19,6 +19,10 @@ try:
     HAS_CURL_CFFI = True
 except Exception:
     HAS_CURL_CFFI = False
+    print(
+        "[!] curl_cffi не установлен. Установите: pip install curl_cffi\n"
+        "    Без него webnovel.com и другие сайты с CloudFlare не будут работать."
+    )
 
 try:
     import cloudscraper  # type: ignore
@@ -129,21 +133,9 @@ class BaseScraper:
         return None
 
     def _head_ok(self, url: str, timeout: int = 10) -> bool:
-        """Проверяет доступность URL через HEAD (или GET маленький)."""
-        if HAS_CURL_CFFI:
-            try:
-                r = cffi_requests.head(
-                    url, impersonate="chrome124", timeout=timeout, allow_redirects=True,
-                )
-                return r.status_code == 200
-            except Exception:
-                pass
-        try:
-            r = self.session.head(url, timeout=timeout, allow_redirects=True)
-            return r.status_code == 200
-        except Exception:
-            pass
-        return False
+        """Проверяет доступность URL через GET (HEAD часто блокируется)."""
+        html = self._fetch_html(url, retries=1, delay=1)
+        return html is not None and len(html) > 500
 
     def _get_soup(self, url: str, retries: int = 2, delay: int = 2) -> Optional[BeautifulSoup]:
         html = self._fetch_html(url, retries=retries, delay=delay)

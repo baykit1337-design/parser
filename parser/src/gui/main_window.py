@@ -376,16 +376,25 @@ class MainWindow(QMainWindow):
 
         title = book_info.get("title", "Без названия")
         site_name = "WebNovel" if site_type == SITE_WEBNOVEL else "MvlEmpyr"
+        ch_count = len(chapters)
 
         if self.novel_title_label:
-            self.novel_title_label.setText(f"{title} [{site_name}]")
+            self.novel_title_label.setText(
+                f"{title} [{site_name}] — {ch_count} глав"
+            )
             self.novel_title_label.setStyleSheet("")
         if self.info_icon_label:
-            self.info_icon_label.setVisible(False)
+            self.info_icon_label.setToolTip(
+                f"<b>{title}</b><br>"
+                f"Сайт: {site_name}<br>"
+                f"Глав: {ch_count}<br><br>"
+                f"Нажмите «Скачать» для загрузки всех глав."
+            )
+            self.info_icon_label.setVisible(True)
 
         self.chapters_widget.clear()
         self.statusbar.showMessage(
-            f"Загружено: {title} — {len(chapters)} глав ({site_name})", 5000
+            f"Загружено: {title} — {ch_count} глав ({site_name})", 5000
         )
 
     def _on_novel_info_loaded(self, novel_info, chapters_data):
