@@ -73,9 +73,21 @@ class WebnovelScraper(BaseScraper):
 
     # --- book info ------------------------------------------------------
 
+    def _get_soup_with_browser_fallback(self, url: str) -> Optional[BeautifulSoup]:
+        """Пробует HTTP, затем браузер."""
+        soup = self._get_soup(url)
+        if soup:
+            return soup
+        from .base import HAS_DRISSION
+        if HAS_DRISSION:
+            html = self._fetch_browser(url)
+            if html:
+                return BeautifulSoup(html, "html.parser")
+        return None
+
     def get_book_info(self, url: str) -> dict:
         book_id = self._extract_book_id(url)
-        soup = self._get_soup(url)
+        soup = self._get_soup_with_browser_fallback(url)
         title = None
 
         if soup:
@@ -205,48 +217,63 @@ class WebnovelScraper(BaseScraper):
         walk(data)
         return chapters
 
+    def _try_extract_chapters(self, soup: BeautifulSoup, book_id: str) -> List[dict]:
+        """Пробует извлечь главы из soup (HTML-ссылки + __NEXT_DATA__)."""
+        if not soup:
+            return []
+        chapters = self._extract_chapters_from_soup(soup, book_id)
+        if chapters:
+            return chapters
+        data = self._parse_next_data(soup)
+        if data:
+            return self._extract_chapters_from_json(data, book_id)
+        return []
+
     def get_chapters_list(self, url: str) -> List[dict]:
         book_id = self._extract_book_id(url) or ""
 
-        # 1. Страница книги
+        # 1. Страница книги (HTTP)
         soup = self._get_soup(url)
-        if soup:
-            chapters = self._extract_chapters_from_soup(soup, book_id)
-            if chapters:
-                return chapters
-            data = self._parse_next_data(soup)
-            if data:
-                chapters = self._extract_chapters_from_json(data, book_id)
-                if chapters:
-                    return chapters
+        chapters = self._try_extract_chapters(soup, book_id)
+        if chapters:
+            return chapters
 
-        # 2. Страница каталога
+        # 2. Страница каталога (HTTP)
         if book_id:
             catalog_url = f"{self.BASE}/book/{book_id}/catalog"
             soup = self._get_soup(catalog_url)
-            if soup:
-                chapters = self._extract_chapters_from_soup(soup, book_id)
-                if chapters:
-                    return chapters
-                data = self._parse_next_data(soup)
-                if data:
-                    chapters = self._extract_chapters_from_json(data, book_id)
-                    if chapters:
-                        return chapters
+            chapters = self._try_extract_chapters(soup, book_id)
+            if chapters:
+                return chapters
 
-        # 3. Мобильная версия
+        # 3. Мобильная версия (HTTP)
         if book_id:
             for path in (f"/book/{book_id}", f"/book/{book_id}/catalog"):
                 mobile_url = self.MOBILE_BASE + path
                 soup = self._get_soup(mobile_url)
-                if soup:
-                    chapters = self._extract_chapters_from_soup(soup, book_id)
-                    if not chapters:
-                        data = self._parse_next_data(soup)
-                        if data:
-                            chapters = self._extract_chapters_from_json(data, book_id)
+                chapters = self._try_extract_chapters(soup, book_id)
+                if chapters:
+                    return chapters
+
+        # 4. Фолбэк через реальный браузер (DrissionPage)
+        from .base import HAS_DRISSION
+        if HAS_DRISSION:
+            print("webnovel: HTTP не сработал, пробую через браузер...")
+            for target_url in (url, f"{self.BASE}/book/{book_id}/catalog" if book_id else None):
+                if not target_url:
+                    continue
+                html = self._fetch_browser(target_url)
+                if html:
+                    soup = BeautifulSoup(html, "html.parser")
+                    chapters = self._try_extract_chapters(soup, book_id)
                     if chapters:
                         return chapters
+        else:
+            print(
+                "\n[!] webnovel.com блокирует HTTP-запросы (CloudFlare).\n"
+                "    Установите DrissionPage для обхода через браузер:\n"
+                "    pip install DrissionPage\n"
+            )
 
         return []
 
@@ -303,17 +330,22 @@ class WebnovelScraper(BaseScraper):
 
         return raw
 
+    def _try_extract_text(self, soup: BeautifulSoup) -> str:
+        if not soup:
+            return ""
+        text = self._extract_text_from_soup(soup)
+        if text.strip():
+            return text
+        return self._extract_text_from_json(soup)
+
     def get_chapter_text(self, chapter_url: str) -> str:
         time.sleep(0.8)
 
+        # HTTP
         soup = self._get_soup(chapter_url)
-        if soup:
-            text = self._extract_text_from_soup(soup)
-            if text.strip():
-                return text
-            text = self._extract_text_from_json(soup)
-            if text.strip():
-                return text
+        text = self._try_extract_text(soup)
+        if text.strip():
+            return text
 
         # Мобильная версия
         book_id = self._extract_book_id(chapter_url)
@@ -321,12 +353,14 @@ class WebnovelScraper(BaseScraper):
         if book_id and chapter_id:
             mobile_url = f"{self.MOBILE_BASE}/book/{book_id}/{chapter_id}"
             soup = self._get_soup(mobile_url)
-            if soup:
-                text = self._extract_text_from_soup(soup)
-                if text.strip():
-                    return text
-                text = self._extract_text_from_json(soup)
-                if text.strip():
-                    return text
+            text = self._try_extract_text(soup)
+            if text.strip():
+                return text
+
+        # Браузер
+        soup = self._get_soup_with_browser_fallback(chapter_url)
+        text = self._try_extract_text(soup)
+        if text.strip():
+            return text
 
         return ""

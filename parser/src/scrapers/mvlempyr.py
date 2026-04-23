@@ -178,18 +178,9 @@ class MvlempyrScraper(BaseScraper):
         return None
 
     def _chapter_accessible(self, book_id: int, num: int) -> bool:
-        """Проверяет существует ли глава через GET (HEAD не всегда поддерживается)."""
+        """Проверяет существует ли глава (тихо, без сообщений об ошибках)."""
         url = f"{self.BASE}/chapter/{book_id}-{num}"
-        # GET с stream=True чтобы не качать весь контент
-        html = self._fetch_html(url, retries=1, delay=1)
-        if not html:
-            return False
-        # Проверяем что это реальная страница главы, а не 404-страница
-        if len(html) < 500:
-            return False
-        if "404" in html[:500] and "not found" in html[:500].lower():
-            return False
-        return True
+        return self._probe_url(url)
 
     def _find_max_chapter(self, book_id: int, known_num: int = 1) -> int:
         """Бинарным поиском находит последнюю доступную главу."""

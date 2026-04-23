@@ -30,6 +30,12 @@ try:
 except Exception:
     HAS_CLOUDSCRAPER = False
 
+try:
+    from DrissionPage import ChromiumPage, ChromiumOptions  # type: ignore
+    HAS_DRISSION = True
+except Exception:
+    HAS_DRISSION = False
+
 
 DEFAULT_HEADERS = {
     "Accept": (
@@ -113,9 +119,32 @@ class BaseScraper:
             pass
         return None
 
-    def _fetch_html(self, url: str, retries: int = 2, delay: int = 2) -> Optional[str]:
+    def _fetch_browser(self, url: str, timeout: int = 20) -> Optional[str]:
+        """Фолбэк через реальный Chrome (DrissionPage) — обходит любую защиту."""
+        if not HAS_DRISSION:
+            return None
+        try:
+            co = ChromiumOptions()
+            co.headless()
+            co.set_argument("--disable-gpu")
+            co.set_argument("--no-sandbox")
+            page = ChromiumPage(co)
+            page.set.timeouts(timeout)
+            page.get(url)
+            time.sleep(3)
+            html = page.html
+            page.quit()
+            if html and len(html) > 200:
+                return html
+        except Exception as e:
+            print(f"DrissionPage: {e}")
+        return None
+
+    def _fetch_html(self, url: str, retries: int = 2, delay: int = 2,
+                     silent: bool = False) -> Optional[str]:
         """
         Цепочка: curl_cffi → cloudscraper → requests.
+        silent=True подавляет сообщение об ошибке (для пробинга).
         """
         for attempt in range(retries):
             for fetcher in (
@@ -129,12 +158,13 @@ class BaseScraper:
             if attempt < retries - 1:
                 time.sleep(delay * (attempt + 1))
 
-        print(f"Ошибка загрузки {url}: все фолбэки исчерпаны")
+        if not silent:
+            print(f"Ошибка загрузки {url}: HTTP-фолбэки исчерпаны")
         return None
 
-    def _head_ok(self, url: str, timeout: int = 10) -> bool:
-        """Проверяет доступность URL через GET (HEAD часто блокируется)."""
-        html = self._fetch_html(url, retries=1, delay=1)
+    def _probe_url(self, url: str) -> bool:
+        """Тихо проверяет доступность URL (без сообщений об ошибках)."""
+        html = self._fetch_html(url, retries=1, delay=1, silent=True)
         return html is not None and len(html) > 500
 
     def _get_soup(self, url: str, retries: int = 2, delay: int = 2) -> Optional[BeautifulSoup]:
