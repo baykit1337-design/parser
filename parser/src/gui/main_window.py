@@ -83,20 +83,21 @@ class ExternalNovelInfoWorker(QThread):
         super().__init__()
         self.url = url
         self.site_type = site_type
+        self.scraper = None
 
     def run(self):
         try:
             if self.site_type == SITE_WEBNOVEL:
                 from ..scrapers.webnovel import WebnovelScraper
-                scraper = WebnovelScraper()
+                self.scraper = WebnovelScraper()
             elif self.site_type == SITE_MVLEMPYR:
                 from ..scrapers.mvlempyr import MvlempyrScraper
-                scraper = MvlempyrScraper()
+                self.scraper = MvlempyrScraper()
             else:
                 raise ValueError(f"Неизвестный сайт: {self.site_type}")
 
-            book_info = scraper.get_book_info(self.url)
-            chapters = scraper.get_chapters_list(self.url)
+            book_info = self.scraper.get_book_info(self.url)
+            chapters = self.scraper.get_chapters_list(self.url)
 
             if not chapters:
                 raise ValueError("Не удалось загрузить список глав")
@@ -124,6 +125,7 @@ class MainWindow(QMainWindow):
         self.current_site_type: Optional[str] = None
         self.external_book_info: Optional[Dict[str, Any]] = None
         self.external_chapters: List[Dict[str, Any]] = []
+        self.external_scraper = None
         self.load_button: Optional[QToolButton] = None
         self.auth_button: Optional[QPushButton] = None
         self.novel_info_bar: Optional[QWidget] = None
@@ -371,6 +373,7 @@ class MainWindow(QMainWindow):
 
         self.external_book_info = book_info
         self.external_chapters = chapters
+        self.external_scraper = getattr(self.external_info_worker, 'scraper', None)
         self.novel_info = None
         self.chapters_data = []
 
@@ -392,8 +395,7 @@ class MainWindow(QMainWindow):
             )
             self.info_icon_label.setVisible(True)
 
-        self.chapters_widget.clear()
-        self.chapters_widget._update_stats_label(ch_count, ch_count)
+        self.chapters_widget.update_external_chapters(chapters)
         self.statusbar.showMessage(
             f"Загружено: {title} — {ch_count} глав ({site_name})", 5000
         )
@@ -539,12 +541,18 @@ class MainWindow(QMainWindow):
 
         # Внешний сайт (webnovel/mvlempyr)
         if self.current_site_type in (SITE_WEBNOVEL, SITE_MVLEMPYR) and self.external_chapters:
+            selected = self.chapters_widget.get_selected_chapters()
+            chapters_to_download = [s["chapter"] for s in selected] if selected else self.external_chapters
+            if not chapters_to_download:
+                show_error_message(self, "Ошибка", "Не выбрано ни одной главы для загрузки")
+                return
             dialog = ExternalDownloadDialog(
                 self.external_book_info,
-                self.external_chapters,
+                chapters_to_download,
                 self.current_site_type,
                 save_dir,
                 self,
+                scraper=getattr(self, 'external_scraper', None),
             )
             dialog.exec()
             return

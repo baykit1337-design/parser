@@ -8,10 +8,11 @@ from typing import Any, Dict, List, Tuple
 
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QIcon, QPixmap
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSplitter, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSplitter, QTreeWidgetItem, QVBoxLayout, QWidget
 
 from ..branches import get_formatted_branches_with_teams
 from .chapter_tree import ChapterTree
+from .chapter_delegate import TEAM_NAME_ROLE, SINGLE_LINE_ITEM_ROLE
 from .filter_widget import TranslationFilterWidget
 from .settings_widget import SettingsWidget
 
@@ -140,6 +141,40 @@ class ChaptersWidget(QWidget):
         self.chapters_tree.clear()
         self.filter_widget.clear()
         self._update_stats_label(0, 0)
+
+    def update_external_chapters(self, chapters: List[Dict[str, Any]]):
+        """Отображение глав из внешних сайтов (mvlempyr, webnovel) в дереве."""
+        self.chapters_tree.clear()
+        if not chapters:
+            self._update_stats_label(0, 0)
+            return
+
+        vol_item = QTreeWidgetItem(["Все главы"])
+        font = vol_item.font(0)
+        font.setBold(True)
+        vol_item.setFont(0, font)
+        vol_item.setFlags(
+            vol_item.flags() | Qt.ItemFlag.ItemIsAutoTristate | Qt.ItemFlag.ItemIsUserCheckable
+        )
+        vol_item.setCheckState(0, Qt.CheckState.Checked)
+        self.chapters_tree.addTopLevelItem(vol_item)
+
+        for ch in chapters:
+            ch_number = ch.get("number", "?")
+            ch_name = ch.get("name", "")
+            title = f"Глава {ch_number} — {ch_name}" if ch_name else f"Глава {ch_number}"
+
+            ch_item = QTreeWidgetItem([title])
+            ch_item.setFlags(ch_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            ch_item.setCheckState(0, Qt.CheckState.Checked)
+            ch_item.setData(0, Qt.ItemDataRole.UserRole, ch)
+            ch_item.setData(1, Qt.ItemDataRole.UserRole, "0")
+            ch_item.setData(0, TEAM_NAME_ROLE, "External")
+            ch_item.setData(0, SINGLE_LINE_ITEM_ROLE, True)
+            vol_item.addChild(ch_item)
+
+        vol_item.setExpanded(True)
+        self._update_stats_label(len(chapters), len(chapters))
 
     def get_selected_chapters_and_formats(self) -> Tuple[List[Dict[str, Any]], List[str], str]:
         """Возвращает кортеж с выбранными главами, форматами и путем сохранения."""
