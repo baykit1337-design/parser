@@ -125,6 +125,48 @@ class SettingsWidget(QWidget):
 
         main_layout.addWidget(self.download_button)
 
+        # --- Секция объединения файлов ---
+        merge_title_label = QLabel("Объединение файлов")
+        merge_title_label.setStyleSheet("margin-top: 10px;")
+        font_merge = merge_title_label.font()
+        font_merge.setBold(True)
+        merge_title_label.setFont(font_merge)
+        main_layout.addWidget(merge_title_label)
+
+        merge_frame = QFrame()
+        merge_frame.setObjectName("renameFrame")
+        merge_layout = QVBoxLayout(merge_frame)
+
+        merge_src_label = QLabel("Папка с .docx файлами:")
+        merge_layout.addWidget(merge_src_label)
+
+        merge_src_path_layout = QHBoxLayout()
+        self.merge_src_edit = QLineEdit()
+        self.merge_src_edit.setReadOnly(True)
+        self.merge_src_edit.setPlaceholderText("Выберите папку с главами")
+        merge_src_path_layout.addWidget(self.merge_src_edit)
+
+        self.merge_src_button = QPushButton("...")
+        self.merge_src_button.setFixedWidth(30)
+        self.merge_src_button.setToolTip("Выбрать папку с .docx файлами")
+        self.merge_src_button.clicked.connect(self._browse_merge_src)
+        merge_src_path_layout.addWidget(self.merge_src_button)
+        merge_layout.addLayout(merge_src_path_layout)
+
+        self.merge_button = QPushButton("Объединить в один DOCX")
+        self.merge_button.setObjectName("renameButton")
+        self.merge_button.setToolTip("Все .docx файлы из папки → один документ")
+        self.merge_button.clicked.connect(self._do_merge)
+        merge_layout.addWidget(self.merge_button)
+
+        self.merge_log = QTextEdit()
+        self.merge_log.setReadOnly(True)
+        self.merge_log.setMaximumHeight(80)
+        self.merge_log.setPlaceholderText("Лог объединения...")
+        merge_layout.addWidget(self.merge_log)
+
+        main_layout.addWidget(merge_frame)
+
         # --- Секция переименования файлов ---
         rename_title_label = QLabel("Переименование файлов")
         rename_title_label.setStyleSheet("margin-top: 10px;")
@@ -220,6 +262,81 @@ class SettingsWidget(QWidget):
         )
         if directory:
             self.path_edit.setText(os.path.normpath(directory))
+
+    def _browse_merge_src(self):
+        """Выбор папки с .docx для объединения"""
+        directory = QFileDialog.getExistingDirectory(
+            self, "Выберите папку с .docx файлами", self.merge_src_edit.text() or ""
+        )
+        if directory:
+            self.merge_src_edit.setText(os.path.normpath(directory))
+
+    def _do_merge(self):
+        """Объединяет все .docx из папки в один документ."""
+        self.merge_log.clear()
+        src_dir = self.merge_src_edit.text()
+
+        if not src_dir or not os.path.isdir(src_dir):
+            self.merge_log.append("<span style='color: #ff0040;'>Укажите папку с файлами</span>")
+            return
+
+        files = sorted(glob.glob(os.path.join(src_dir, "*.docx")))
+        if not files:
+            self.merge_log.append("Нет .docx файлов в выбранной папке")
+            return
+
+        try:
+            from docx import Document
+            from docx.shared import Pt
+            from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+        except ImportError:
+            self.merge_log.append(
+                "<span style='color: #ff0040;'>Ошибка: python-docx не установлен</span>"
+            )
+            return
+
+        merged = Document()
+
+        style = merged.styles["Normal"]
+        style.font.size = Pt(12)
+        style.font.name = "Times New Roman"
+
+        for i, filepath in enumerate(files):
+            chapter_name = os.path.splitext(os.path.basename(filepath))[0]
+
+            if i > 0:
+                merged.add_page_break()
+
+            heading = merged.add_heading(chapter_name, level=1)
+            heading.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+
+            try:
+                chapter_doc = Document(filepath)
+                for para in chapter_doc.paragraphs:
+                    text = para.text.strip()
+                    if text:
+                        merged.add_paragraph(text)
+            except Exception as e:
+                merged.add_paragraph(f"[Ошибка чтения: {e}]")
+                self.merge_log.append(
+                    f"<span style='color: #ff0040;'>Ошибка: {chapter_name} — {e}</span>"
+                )
+
+        parent_dir = os.path.dirname(src_dir)
+        folder_name = os.path.basename(src_dir)
+        output_name = f"{folder_name} (объединённый).docx"
+        output_path = os.path.join(parent_dir, output_name)
+
+        try:
+            merged.save(output_path)
+            self.merge_log.append(
+                f"<b>Готово! {len(files)} глав → {output_name}</b>"
+            )
+            self.merge_log.append(f"Сохранено: {output_path}")
+        except Exception as e:
+            self.merge_log.append(
+                f"<span style='color: #ff0040;'>Ошибка сохранения: {e}</span>"
+            )
 
     def _browse_rename_src(self):
         """Выбор папки-источника для переименования"""
@@ -329,6 +446,9 @@ class SettingsWidget(QWidget):
         chain.append(self.path_edit)
         chain.append(self.browse_button)
         chain.append(self.download_button)
+        chain.append(self.merge_src_edit)
+        chain.append(self.merge_src_button)
+        chain.append(self.merge_button)
         chain.append(self.rename_src_edit)
         chain.append(self.rename_src_button)
         chain.append(self.rename_dst_edit)

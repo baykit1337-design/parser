@@ -1,156 +1,366 @@
 """
-Скрапер для webnovel.com
+Скрапер для webnovel.com.
+
+URL-паттерны:
+- Книга:   https://www.webnovel.com/book/{slug}_{bookId}
+- Глава:   https://www.webnovel.com/book/{bookId}/{chapterId}
+           или /book/{slug}_{bookId}/{num}.-{slug}_{chapterId}
+- Мобильная: https://m.webnovel.com/book/{bookId}
+
+Для обхода CloudFlare используется curl_cffi (TLS-имитация Chrome).
 """
 
+import json
 import re
 import time
-from urllib.parse import urlparse, urljoin
+from typing import List, Optional
+from urllib.parse import urljoin
+
+from bs4 import BeautifulSoup
 
 from .base import BaseScraper
 
+try:
+    from curl_cffi import requests as cffi_requests  # type: ignore
+    HAS_CURL_CFFI = True
+except Exception:
+    HAS_CURL_CFFI = False
+
 
 class WebnovelScraper(BaseScraper):
-    """Скрапер для сайта webnovel.com"""
+    """Скрапер для webnovel.com."""
+
+    BASE = "https://www.webnovel.com"
+    MOBILE_BASE = "https://m.webnovel.com"
 
     def _setup_headers(self):
         self.session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
             "Referer": "https://www.webnovel.com/",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
+            "Origin": "https://www.webnovel.com",
         })
 
-    def _extract_book_id(self, url):
-        """Извлекает ID книги из URL webnovel."""
-        match = re.search(r'/book/(\d+)', url)
-        if match:
-            return match.group(1)
-        path = urlparse(url).path
-        parts = path.strip("/").split("/")
-        for part in parts:
-            if part.isdigit() and len(part) > 8:
-                return part
+    # --- helpers --------------------------------------------------------
+
+    @staticmethod
+    def _extract_book_id(url: str) -> Optional[str]:
+        m = re.search(r"/book/[^/]*?_(\d{8,})", url)
+        if m:
+            return m.group(1)
+        m = re.search(r"/book/(\d{8,})(?:/|$|\?)", url)
+        if m:
+            return m.group(1)
         return None
 
-    def get_book_info(self, url):
-        """Получение информации о книге с webnovel.com"""
-        soup = self._get_soup(url)
-        if not soup:
-            return {"title": "Без названия", "url": url}
+    @staticmethod
+    def _extract_chapter_id(url: str) -> Optional[str]:
+        m = re.search(r"_(\d{8,})/?$", url)
+        if m:
+            return m.group(1)
+        m = re.search(r"/book/\d+/(\d+)", url)
+        if m:
+            return m.group(1)
+        return None
 
-        title_tag = soup.find("h1") or soup.find("h2")
-        title = title_tag.get_text(strip=True) if title_tag else "Без названия"
+    @staticmethod
+    def _parse_next_data(soup: BeautifulSoup) -> dict:
+        script = soup.find("script", {"id": "__NEXT_DATA__"})
+        if not script or not script.string:
+            return {}
+        try:
+            return json.loads(script.string)
+        except Exception:
+            return {}
+
+    # --- book info ------------------------------------------------------
+
+    def _get_soup_with_browser_fallback(self, url: str) -> Optional[BeautifulSoup]:
+        """Пробует HTTP, затем браузер."""
+        soup = self._get_soup(url)
+        if soup:
+            return soup
+        from .base import HAS_DRISSION
+        if HAS_DRISSION:
+            html = self._fetch_browser(url)
+            if html:
+                return BeautifulSoup(html, "html.parser")
+        return None
+
+    def get_book_info(self, url: str) -> dict:
+        book_id = self._extract_book_id(url)
+        soup = self._get_soup_with_browser_fallback(url)
+        title = None
+
+        if soup:
+            og = soup.find("meta", {"property": "og:title"})
+            if og and og.get("content"):
+                title = og["content"].strip()
+
+            if not title:
+                for sel in ("h1", "h2", ".g_book_name", "title"):
+                    tag = soup.select_one(sel)
+                    if tag:
+                        text = tag.get_text(strip=True)
+                        if text and len(text) > 1:
+                            title = text
+                            break
+
+            if title:
+                title = re.sub(
+                    r"\s*[\|\-–—]\s*(WebNovel|Webnovel|webnovel).*$", "", title
+                )
+
+            # Попробуем __NEXT_DATA__
+            if not title:
+                data = self._parse_next_data(soup)
+                title = self._walk_for_key(data, ("bookName", "name", "title"))
 
         return {
-            "title": title,
+            "title": title or "Без названия",
             "url": url,
-            "book_id": self._extract_book_id(url),
+            "book_id": book_id,
         }
 
-    def get_chapters_list(self, url):
-        """Получение списка глав с webnovel.com"""
-        book_id = self._extract_book_id(url)
-        if not book_id:
-            print("Не удалось определить ID книги в URL webnovel")
-            return []
+    @staticmethod
+    def _walk_for_key(obj, keys, max_depth=10):
+        if max_depth <= 0:
+            return None
+        if isinstance(obj, dict):
+            for key in keys:
+                val = obj.get(key)
+                if isinstance(val, str) and len(val) > 1:
+                    return val
+            for v in obj.values():
+                r = WebnovelScraper._walk_for_key(v, keys, max_depth - 1)
+                if r:
+                    return r
+        elif isinstance(obj, list):
+            for item in obj:
+                r = WebnovelScraper._walk_for_key(item, keys, max_depth - 1)
+                if r:
+                    return r
+        return None
 
-        catalog_url = f"https://www.webnovel.com/book/{book_id}/catalog"
-        soup = self._get_soup(catalog_url)
-        if not soup:
-            soup = self._get_soup(url)
-        if not soup:
-            return []
+    # --- chapters list --------------------------------------------------
 
-        chapters = []
-        chapter_links = soup.select("a[href*='/book/'][href*='/chapter/']")
-        if not chapter_links:
-            chapter_links = soup.select(".chapter-item a, .catalog-item a, li a[href*='chapter']")
+    def _extract_chapters_from_soup(self, soup: BeautifulSoup, book_id: str) -> List[dict]:
+        """Извлекает главы из HTML-ссылок на странице."""
+        chapters: List[dict] = []
+        seen = set()
 
-        seen_urls = set()
-        for i, link in enumerate(chapter_links):
-            href = link.get("href", "")
-            if not href:
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            text = a.get_text(strip=True)
+            if not href or not text:
                 continue
-            full_url = urljoin("https://www.webnovel.com", href)
-            if full_url in seen_urls:
+            if not re.search(r"/book/.*?/\d+|/chapter", href):
                 continue
-            seen_urls.add(full_url)
+            full_url = urljoin(self.BASE, href)
+            if full_url in seen:
+                continue
+            seen.add(full_url)
 
-            name = link.get_text(strip=True)
-            ch_match = re.search(r'chapter\s*(\d+)', name, re.IGNORECASE)
-            ch_number = ch_match.group(1) if ch_match else str(i + 1)
+            ch_match = re.search(r"(?:chapter|ch\.?)\s*(\d+)", text, re.IGNORECASE)
+            idx_match = re.search(r"^(\d+)\.\s*", text)
+            ch_number = (ch_match and ch_match.group(1)) or (idx_match and idx_match.group(1)) or str(len(chapters) + 1)
 
-            ch_name = re.sub(r'^chapter\s*\d+\s*[-:.]?\s*', '', name, flags=re.IGNORECASE).strip()
+            name = re.sub(
+                r"^\s*(?:\d+\.\s*)?(?:chapter|ch\.?)\s*\d+[\s:.\-–—]*",
+                "", text, flags=re.IGNORECASE,
+            ).strip() or text
 
             chapters.append({
                 "number": ch_number,
-                "name": ch_name or name,
+                "name": name,
                 "url": full_url,
                 "volume": "1",
             })
 
         return chapters
 
-    def get_chapter_text(self, chapter_url):
-        """Получение текста главы с webnovel.com"""
-        time.sleep(1)
-        soup = self._get_soup(chapter_url)
-        if not soup:
-            return ""
+    def _extract_chapters_from_json(self, data: dict, book_id: str) -> List[dict]:
+        """Извлекает главы из __NEXT_DATA__ JSON."""
+        chapters: List[dict] = []
 
-        content_selectors = [
+        def walk(obj, volume="1"):
+            if isinstance(obj, list):
+                for item in obj:
+                    if isinstance(item, dict) and any(
+                        k in item for k in ("chapterId", "id", "cId", "chapter_id")
+                    ):
+                        cid = (
+                            item.get("chapterId")
+                            or item.get("chapter_id")
+                            or item.get("cId")
+                            or item.get("id")
+                        )
+                        name = (
+                            item.get("chapterName")
+                            or item.get("chapter_name")
+                            or item.get("cN")
+                            or item.get("name")
+                            or f"Chapter {cid}"
+                        )
+                        idx = item.get("chapterIndex") or item.get("index") or len(chapters) + 1
+                        chapters.append({
+                            "number": str(idx),
+                            "name": str(name),
+                            "url": f"{self.BASE}/book/{book_id}/{cid}",
+                            "volume": str(volume),
+                        })
+                    else:
+                        walk(item, volume)
+            elif isinstance(obj, dict):
+                vol = obj.get("volumeId") or obj.get("volumeIndex") or volume
+                for v in obj.values():
+                    walk(v, vol)
+
+        walk(data)
+        return chapters
+
+    def _try_extract_chapters(self, soup: BeautifulSoup, book_id: str) -> List[dict]:
+        """Пробует извлечь главы из soup (HTML-ссылки + __NEXT_DATA__)."""
+        if not soup:
+            return []
+        chapters = self._extract_chapters_from_soup(soup, book_id)
+        if chapters:
+            return chapters
+        data = self._parse_next_data(soup)
+        if data:
+            return self._extract_chapters_from_json(data, book_id)
+        return []
+
+    def get_chapters_list(self, url: str) -> List[dict]:
+        book_id = self._extract_book_id(url) or ""
+
+        # 1. Страница книги (HTTP)
+        soup = self._get_soup(url)
+        chapters = self._try_extract_chapters(soup, book_id)
+        if chapters:
+            return chapters
+
+        # 2. Страница каталога (HTTP)
+        if book_id:
+            catalog_url = f"{self.BASE}/book/{book_id}/catalog"
+            soup = self._get_soup(catalog_url)
+            chapters = self._try_extract_chapters(soup, book_id)
+            if chapters:
+                return chapters
+
+        # 3. Мобильная версия (HTTP)
+        if book_id:
+            for path in (f"/book/{book_id}", f"/book/{book_id}/catalog"):
+                mobile_url = self.MOBILE_BASE + path
+                soup = self._get_soup(mobile_url)
+                chapters = self._try_extract_chapters(soup, book_id)
+                if chapters:
+                    return chapters
+
+        # 4. Фолбэк через реальный браузер (DrissionPage)
+        from .base import HAS_DRISSION
+        if HAS_DRISSION:
+            print("webnovel: HTTP не сработал, пробую через браузер...")
+            for target_url in (url, f"{self.BASE}/book/{book_id}/catalog" if book_id else None):
+                if not target_url:
+                    continue
+                html = self._fetch_browser(target_url)
+                if html:
+                    soup = BeautifulSoup(html, "html.parser")
+                    chapters = self._try_extract_chapters(soup, book_id)
+                    if chapters:
+                        return chapters
+        else:
+            print(
+                "\n[!] webnovel.com блокирует HTTP-запросы (CloudFlare).\n"
+                "    Установите DrissionPage для обхода через браузер:\n"
+                "    pip install DrissionPage\n"
+            )
+
+        return []
+
+    # --- chapter text ---------------------------------------------------
+
+    def _extract_text_from_soup(self, soup: BeautifulSoup) -> str:
+        selectors = [
             ".cha-words",
             ".cha-content",
+            ".chapter_content",
             ".chapter-content",
             ".read-content",
-            "[class*='chapter'] [class*='content']",
             ".j_contentWrap",
+            "#chapterContent",
             "article",
+            "main",
         ]
+        for selector in selectors:
+            node = soup.select_one(selector)
+            if not node:
+                continue
+            for tag in node.find_all(["script", "style", "img", "noscript", "iframe", "button"]):
+                tag.decompose()
+            for ad in node.find_all(class_=re.compile(r"ad|banner|promo|piracy|lock|pay", re.I)):
+                ad.decompose()
 
-        content_div = None
-        for selector in content_selectors:
-            content_div = soup.select_one(selector)
-            if content_div:
-                break
+            paragraphs = [
+                p.get_text(" ", strip=True)
+                for p in node.find_all("p")
+                if p.get_text(strip=True) and len(p.get_text(strip=True)) > 1
+            ]
+            if paragraphs:
+                return "\n".join(paragraphs)
 
-        if not content_div:
-            main = soup.find("main") or soup.find("div", {"id": "chapter-container"})
-            if main:
-                content_div = main
+            text = node.get_text("\n", strip=True)
+            lines = [ln.strip() for ln in text.splitlines() if len(ln.strip()) > 1]
+            if lines:
+                return "\n".join(lines)
+        return ""
 
-        if not content_div:
+    def _extract_text_from_json(self, soup: BeautifulSoup) -> str:
+        data = self._parse_next_data(soup)
+        if not data:
             return ""
 
-        for tag in content_div.find_all(["script", "style", "img", "noscript", "iframe"]):
-            tag.decompose()
+        raw = self._walk_for_key(data, ("content", "chapterContent", "chapter_content", "contents"))
+        if not raw:
+            return ""
 
-        for ad in content_div.find_all(class_=re.compile(r"ad|banner|promo|piracy", re.I)):
-            ad.decompose()
+        if "<" in raw and ">" in raw:
+            inner = BeautifulSoup(raw, "html.parser")
+            paragraphs = [p.get_text(" ", strip=True) for p in inner.find_all("p") if p.get_text(strip=True)]
+            return "\n".join(paragraphs) if paragraphs else inner.get_text("\n", strip=True)
 
-        paragraphs = []
-        for p in content_div.find_all("p"):
-            text = p.get_text(strip=True)
-            if text and len(text) > 1:
-                paragraphs.append(text)
+        return raw
 
-        if not paragraphs:
-            text = content_div.get_text(separator="\n")
-            for line in text.splitlines():
-                line = line.strip()
-                if line and len(line) > 1:
-                    paragraphs.append(line)
+    def _try_extract_text(self, soup: BeautifulSoup) -> str:
+        if not soup:
+            return ""
+        text = self._extract_text_from_soup(soup)
+        if text.strip():
+            return text
+        return self._extract_text_from_json(soup)
 
-        return "\n".join(paragraphs)
+    def get_chapter_text(self, chapter_url: str) -> str:
+        time.sleep(0.8)
+
+        # HTTP
+        soup = self._get_soup(chapter_url)
+        text = self._try_extract_text(soup)
+        if text.strip():
+            return text
+
+        # Мобильная версия
+        book_id = self._extract_book_id(chapter_url)
+        chapter_id = self._extract_chapter_id(chapter_url)
+        if book_id and chapter_id:
+            mobile_url = f"{self.MOBILE_BASE}/book/{book_id}/{chapter_id}"
+            soup = self._get_soup(mobile_url)
+            text = self._try_extract_text(soup)
+            if text.strip():
+                return text
+
+        # Браузер
+        soup = self._get_soup_with_browser_fallback(chapter_url)
+        text = self._try_extract_text(soup)
+        if text.strip():
+            return text
+
+        return ""

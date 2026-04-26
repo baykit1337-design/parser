@@ -376,16 +376,26 @@ class MainWindow(QMainWindow):
 
         title = book_info.get("title", "Без названия")
         site_name = "WebNovel" if site_type == SITE_WEBNOVEL else "MvlEmpyr"
+        ch_count = len(chapters)
 
         if self.novel_title_label:
-            self.novel_title_label.setText(f"{title} [{site_name}]")
+            self.novel_title_label.setText(
+                f"{title} [{site_name}] — {ch_count} глав"
+            )
             self.novel_title_label.setStyleSheet("")
         if self.info_icon_label:
-            self.info_icon_label.setVisible(False)
+            self.info_icon_label.setToolTip(
+                f"<b>{title}</b><br>"
+                f"Сайт: {site_name}<br>"
+                f"Глав: {ch_count}<br><br>"
+                f"Нажмите «Скачать» для загрузки всех глав."
+            )
+            self.info_icon_label.setVisible(True)
 
         self.chapters_widget.clear()
+        self.chapters_widget._update_stats_label(ch_count, ch_count)
         self.statusbar.showMessage(
-            f"Загружено: {title} — {len(chapters)} глав ({site_name})", 5000
+            f"Загружено: {title} — {ch_count} глав ({site_name})", 5000
         )
 
     def _on_novel_info_loaded(self, novel_info, chapters_data):
@@ -396,9 +406,13 @@ class MainWindow(QMainWindow):
         self.external_book_info = None
         self.external_chapters = []
 
-        def clean_title(t_raw: Optional[str]) -> str:
+        def clean_title(t_raw) -> str:
             if not t_raw:
                 return ""
+            if isinstance(t_raw, dict):
+                t_raw = t_raw.get("ru") or t_raw.get("en") or next(iter(t_raw.values()), "")
+            if not isinstance(t_raw, str):
+                t_raw = str(t_raw) if t_raw else ""
             t_decoded = self.parser.decode_html_entities(t_raw)
             return re.sub(r"\s*\((?:Новелла|Novel)\)\s*$", "", t_decoded, flags=re.IGNORECASE).strip()
 
@@ -438,7 +452,17 @@ class MainWindow(QMainWindow):
                 tags_text = ", ".join([f"#{name}" for name in tag_names])
                 details_html += f"<p><b>Теги:</b> {tags_text}</p>"
 
-        raw_summary = self.novel_info.get("summary", "Описание отсутствует.")
+        raw_summary = self.novel_info.get("summary", "")
+        # API может вернуть dict {"ru": "...", "en": "..."} вместо строки
+        if isinstance(raw_summary, dict):
+            raw_summary = (
+                raw_summary.get("ru")
+                or raw_summary.get("en")
+                or next(iter(raw_summary.values()), "")
+            )
+        if not isinstance(raw_summary, str):
+            raw_summary = str(raw_summary) if raw_summary else ""
+        raw_summary = raw_summary or "Описание отсутствует."
         decoded_summary = self.parser.decode_html_entities(raw_summary)
         summary = decoded_summary.replace("\n", "<br>")
         details_html += f'<div style="margin-top: 10px;"><b>Описание:</b><br/>{summary}</div>'

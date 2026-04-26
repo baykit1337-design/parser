@@ -1,6 +1,9 @@
 beautifulsoup4
-ebooklib
+cloudscraper
+curl_cffi
 deep-translator
+DrissionPage
+ebooklib
 lxml
 Pillow
 PyQt6
