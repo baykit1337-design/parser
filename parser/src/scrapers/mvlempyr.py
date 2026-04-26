@@ -5,17 +5,15 @@ URL-паттерны:
 - Книга:  https://www.mvlempyr.io/novel/{slug}
 - Глава:  https://www.mvlempyr.io/chapter/{book_id}-{chapter_number}
 
-Список глав на странице рендерится JavaScript'ом. Стратегия:
-1. Найти book_id из HTML (скрипты, мета-теги, ссылки, data-атрибуты)
-2. Определить кол-во глав пробингом GET-запросами (бинарный поиск)
-3. Сгенерировать URL-ы /chapter/{id}-1 … /chapter/{id}-N
+Сайт защищён CloudFlare — HTTP-запросы не проходят.
+Используем Chrome пользователя (DrissionPage) для загрузки страниц.
 """
 
 import json
 import re
 import time
 from typing import List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
@@ -32,7 +30,7 @@ class MvlempyrScraper(BaseScraper):
             "Referer": "https://www.mvlempyr.io/",
         })
 
-    # --- helpers --------------------------------------------------------
+    # --- helpers ----------------------------------------------------------
 
     @staticmethod
     def _parse_chapter_url(url: str):
@@ -42,116 +40,64 @@ class MvlempyrScraper(BaseScraper):
             return int(m.group(1)), int(m.group(2))
         return None, None
 
-    def _find_book_id_from_page(self, soup: BeautifulSoup) -> Optional[int]:
-        """Ищет book_id из HTML всеми доступными способами."""
+    @staticmethod
+    def _extract_slug(url: str) -> Optional[str]:
+        m = re.search(r"/novel/([a-z0-9\-]+)", url, re.IGNORECASE)
+        return m.group(1) if m else None
 
-        # 1. Ссылки <a href="..."> с /chapter/{id}-{num}
+    def _find_book_id_from_soup(self, soup: BeautifulSoup) -> Optional[int]:
+        """Ищет book_id из HTML."""
+        # Ссылки /chapter/{id}-{num}
         for a in soup.select("a[href]"):
             href = a.get("href", "")
             m = re.search(r"/chapter/(\d+)-\d+", href)
             if m:
-                print(f"mvlempyr: book_id найден в ссылке: {href}")
                 return int(m.group(1))
 
-        # 2. Любые URL с /chapter/{id}-{num} в тексте скриптов
+        # Скрипты
         for script in soup.find_all("script"):
-            text = script.string or ""
-            if not text:
-                # Попробуем взять содержимое через .text
-                text = script.get_text() or ""
+            text = script.string or script.get_text() or ""
             m = re.search(r"/chapter/(\d{3,})-\d+", text)
             if m:
-                print(f"mvlempyr: book_id найден в <script>")
                 return int(m.group(1))
 
-        # 3. JSON внутри __NEXT_DATA__
+        # __NEXT_DATA__
         next_data = soup.find("script", {"id": "__NEXT_DATA__"})
         if next_data and next_data.string:
             try:
                 data = json.loads(next_data.string)
                 bid = self._walk_json_for_book_id(data)
                 if bid:
-                    print(f"mvlempyr: book_id из __NEXT_DATA__: {bid}")
                     return bid
             except Exception:
                 pass
 
-        # 4. Любой JSON в <script type="application/json"> или <script type="application/ld+json">
+        # JSON скрипты
         for script in soup.find_all("script", {"type": re.compile(r"application/(json|ld\+json)")}):
             text = script.string or ""
             try:
                 data = json.loads(text)
                 bid = self._walk_json_for_book_id(data)
                 if bid:
-                    print(f"mvlempyr: book_id из JSON script: {bid}")
                     return bid
             except Exception:
                 pass
 
-        # 5. data-* атрибуты с числами (4+ цифр)
-        for tag in soup.find_all(attrs={"data-id": True}):
-            val = tag.get("data-id", "")
-            if val.isdigit() and len(val) >= 3:
-                print(f"mvlempyr: book_id из data-id: {val}")
-                return int(val)
-        for tag in soup.find_all(attrs={"data-novel-id": True}):
-            val = tag.get("data-novel-id", "")
-            if val.isdigit():
-                print(f"mvlempyr: book_id из data-novel-id: {val}")
-                return int(val)
-
-        # 6. Мета-теги
-        for meta in soup.find_all("meta"):
-            content = meta.get("content", "")
-            m = re.search(r"/chapter/(\d{3,})-\d+", content)
-            if m:
-                print(f"mvlempyr: book_id из meta: {content}")
-                return int(m.group(1))
-
-        # 7. Канонический URL
-        canonical = soup.find("link", {"rel": "canonical"})
-        if canonical:
-            href = canonical.get("href", "")
-            m = re.search(r"/chapter/(\d{3,})-\d+", href)
-            if m:
-                return int(m.group(1))
-
-        # 8. Поиск паттерна "novel_id": N или "bookId": N в любом тексте скриптов
+        # JS переменные с book/novel id
         for script in soup.find_all("script"):
             text = script.string or script.get_text() or ""
             for pattern in [
                 r'"(?:novel_id|novelId|book_id|bookId|story_id|storyId|nid)"\s*:\s*(\d{3,})',
                 r"(?:novel_id|novelId|book_id|bookId|story_id|storyId|nid)\s*=\s*(\d{3,})",
-                r"'(?:novel_id|novelId|book_id|bookId|story_id|storyId|nid)'\s*:\s*(\d{3,})",
             ]:
                 m = re.search(pattern, text)
                 if m:
-                    print(f"mvlempyr: book_id из JS переменной: {m.group(1)}")
                     return int(m.group(1))
-
-        # 9. Ссылки на chap.mvlempyr.space (альтернативный домен)
-        for a in soup.select("a[href]"):
-            href = a.get("href", "")
-            m = re.search(r"chap\.mvlempyr\.\w+/chapter/(\d+)-\d+", href)
-            if m:
-                print(f"mvlempyr: book_id из chap.mvlempyr ссылки: {m.group(1)}")
-                return int(m.group(1))
-
-        # Диагностика: вывести все найденные ссылки для отладки
-        all_links = [a.get("href", "") for a in soup.select("a[href]")]
-        chapter_links = [l for l in all_links if "chapter" in l.lower()]
-        if chapter_links:
-            print(f"mvlempyr: найдены ссылки с 'chapter': {chapter_links[:5]}")
-        else:
-            print(f"mvlempyr: ссылок с 'chapter' не найдено. Всего ссылок: {len(all_links)}")
-            if all_links:
-                print(f"mvlempyr: примеры ссылок: {all_links[:10]}")
 
         return None
 
     @staticmethod
     def _walk_json_for_book_id(obj, depth=10):
-        """Рекурсивно ищет book_id в JSON."""
         if depth <= 0:
             return None
         if isinstance(obj, dict):
@@ -177,117 +123,117 @@ class MvlempyrScraper(BaseScraper):
                     return result
         return None
 
-    def _chapter_accessible(self, book_id: int, num: int) -> bool:
-        """Проверяет существует ли глава (тихо, без сообщений об ошибках)."""
-        url = f"{self.BASE}/chapter/{book_id}-{num}"
-        return self._probe_url(url)
+    # --- chapter discovery (browser-first) --------------------------------
 
-    def _find_max_chapter(self, book_id: int, known_num: int = 1) -> int:
-        """Бинарным поиском находит последнюю доступную главу."""
-        # Проверяем что первая глава вообще существует
-        if not self._chapter_accessible(book_id, 1):
-            print(f"mvlempyr: глава {book_id}-1 недоступна")
-            return 0
+    def _extract_chapters_from_rendered_html(self, soup: BeautifulSoup, book_id: int) -> List[dict]:
+        """Извлекает список глав из отрендеренного HTML (после JS)."""
+        chapters: List[dict] = []
+        seen = set()
 
-        # Экспоненциально ищем верхнюю границу
-        hi = max(known_num, 1)
+        # a.chapter-item с data-listing-index (из скриншота пользователя)
+        for item in soup.select("a.chapter-item, a[data-listing-index]"):
+            href = item.get("href", "")
+            idx = item.get("data-listing-index", "")
+            text = item.get_text(strip=True)
+
+            if href and "/chapter/" in href:
+                full_url = urljoin(self.BASE, href)
+                if full_url in seen:
+                    continue
+                seen.add(full_url)
+
+                m = re.search(r"/chapter/\d+-(\d+)", href)
+                ch_num = m.group(1) if m else (idx or str(len(chapters) + 1))
+
+                chapters.append({
+                    "number": str(ch_num),
+                    "name": text or f"Chapter {ch_num}",
+                    "url": full_url,
+                    "volume": "1",
+                })
+
+        if chapters:
+            return chapters
+
+        # Любые ссылки на /chapter/{book_id}-{num}
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            m = re.search(rf"/chapter/{book_id}-(\d+)", href)
+            if not m:
+                continue
+            full_url = urljoin(self.BASE, href)
+            if full_url in seen:
+                continue
+            seen.add(full_url)
+            ch_num = m.group(1)
+            text = a.get_text(strip=True)
+
+            chapters.append({
+                "number": ch_num,
+                "name": text or f"Chapter {ch_num}",
+                "url": full_url,
+                "volume": "1",
+            })
+
+        return chapters
+
+    def _find_novel_url_from_chapter(self, soup: BeautifulSoup) -> Optional[str]:
+        """Находит URL страницы новеллы из страницы главы."""
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            if "/novel/" in href and "/chapter/" not in href:
+                return urljoin(self.BASE, href)
+        return None
+
+    def _find_max_chapter_browser(self, book_id: int, known_num: int = 1) -> int:
+        """Бинарным поиском через браузер находит последнюю главу."""
+        print(f"mvlempyr: бинарный поиск глав через браузер (от {known_num})...")
+
+        # Проверяем что known_num доступна
+        if not self._probe_url_browser(f"{self.BASE}/chapter/{book_id}-{known_num}"):
+            # Пробуем главу 1
+            if known_num != 1 and self._probe_url_browser(f"{self.BASE}/chapter/{book_id}-1"):
+                known_num = 1
+            else:
+                return 0
+
+        # Экспоненциально ищем верхнюю границу (от known_num)
+        hi = known_num
         while hi <= 10000:
-            if self._chapter_accessible(book_id, hi):
-                hi *= 2
-                time.sleep(0.2)
+            next_hi = hi * 2 if hi > known_num else known_num * 2
+            if next_hi <= hi:
+                next_hi = hi * 2
+            if self._probe_url_browser(f"{self.BASE}/chapter/{book_id}-{next_hi}"):
+                hi = next_hi
+                time.sleep(0.5)
             else:
                 break
 
-        # Бинарный поиск
-        lo = max(hi // 2, 1)
-        hi = min(hi, 10000)
+        lo = hi // 2 if hi > known_num else known_num
+        hi = min(hi * 2 if hi == known_num else hi, 10000)
+
         while lo < hi:
             mid = (lo + hi + 1) // 2
-            time.sleep(0.2)
-            if self._chapter_accessible(book_id, mid):
+            time.sleep(0.5)
+            if self._probe_url_browser(f"{self.BASE}/chapter/{book_id}-{mid}"):
                 lo = mid
+                print(f"  глава {mid} — есть")
             else:
                 hi = mid - 1
+                print(f"  глава {mid} — нет")
 
+        print(f"mvlempyr: последняя глава = {lo}")
         return lo
 
-    # --- public API -----------------------------------------------------
-
-    @staticmethod
-    def _extract_slug(url: str) -> Optional[str]:
-        """Извлекает slug из URL /novel/{slug}."""
-        m = re.search(r"/novel/([a-z0-9\-]+)", url, re.IGNORECASE)
-        return m.group(1) if m else None
-
-    def _title_from_slug(self, slug: str) -> str:
-        """Превращает slug в читаемое название."""
-        return slug.replace("-", " ").title()
-
-    def _get_book_id_with_fallbacks(self, url: str) -> Optional[int]:
-        """Ищет book_id всеми способами."""
-        book_id, ch_num = self._parse_chapter_url(url)
-        if book_id:
-            return book_id
-
-        # 1. HTTP — загрузить страницу книги
-        soup = self._get_soup(url, retries=1, delay=1)
-        if soup:
-            book_id = self._find_book_id_from_page(soup)
-            if book_id:
-                return book_id
-
-        # 2. Браузер — загрузить страницу через Chrome пользователя
-        from .base import HAS_DRISSION
-        if HAS_DRISSION:
-            print("mvlempyr: HTTP не работает, пробую через браузер...")
-            html = self._fetch_browser(url)
-            if html:
-                soup = BeautifulSoup(html, "html.parser")
-                book_id = self._find_book_id_from_page(soup)
-                if book_id:
-                    return book_id
-
-        # 3. Брутфорс — пробуем популярные id (последние книги имеют id 6000-9000)
-        slug = self._extract_slug(url)
-        if slug:
-            print(f"mvlempyr: пробую подобрать book_id для '{slug}'...")
-            book_id = self._bruteforce_book_id(slug)
-            if book_id:
-                return book_id
-
-        return None
-
-    def _bruteforce_book_id(self, slug: str) -> Optional[int]:
-        """Пробует загрузить первую главу с разными book_id,
-        проверяя что slug совпадает с названием в HTML."""
-        # Пробуем загрузить страницу /chapter/{id}-1 для нескольких id
-        # mvlempyr перенаправляет или показывает slug в HTML
-        # Диапазон последних книг: примерно 5000-9000
-        for test_id in range(9000, 4000, -50):
-            url = f"{self.BASE}/chapter/{test_id}-1"
-            html = self._fetch_html(url, retries=1, delay=0, silent=True)
-            if html and len(html) > 500:
-                if slug.replace("-", " ").lower() in html.lower():
-                    print(f"mvlempyr: book_id={test_id} соответствует slug '{slug}'")
-                    return test_id
-            time.sleep(0.1)
-        return None
+    # --- public API -------------------------------------------------------
 
     def get_book_info(self, url: str) -> dict:
         book_id, ch_num = self._parse_chapter_url(url)
 
+        # Загружаем страницу (HTTP → браузер)
+        soup = self._get_soup_with_browser(url)
+
         title = None
-        soup = None
-
-        # Попробуем загрузить страницу
-        soup = self._get_soup(url, retries=1, delay=1)
-        if not soup:
-            from .base import HAS_DRISSION
-            if HAS_DRISSION:
-                html = self._fetch_browser(url)
-                if html:
-                    soup = BeautifulSoup(html, "html.parser")
-
         if soup:
             for sel in ("h1", ".novel-title", ".entry-title", "title"):
                 tag = soup.select_one(sel)
@@ -298,29 +244,15 @@ class MvlempyrScraper(BaseScraper):
                         break
             if title:
                 title = re.sub(r"\s*[\|\-–—]\s*MVLEMPYR.*$", "", title, flags=re.IGNORECASE)
+                title = re.sub(r"\s*-?\s*Chapter\s*\d+.*$", "", title, flags=re.IGNORECASE).strip()
 
             if not book_id:
-                book_id = self._find_book_id_from_page(soup)
+                book_id = self._find_book_id_from_soup(soup)
 
-        # Если book_id не нашли через HTML — используем фолбэки
-        if not book_id:
-            book_id = self._get_book_id_with_fallbacks(url)
-
-        # Если title не нашли — из slug
         if not title:
             slug = self._extract_slug(url)
             if slug:
-                title = self._title_from_slug(slug)
-
-        # Если есть book_id но нет title — из первой главы
-        if not title and book_id:
-            ch_soup = self._get_soup(f"{self.BASE}/chapter/{book_id}-1", retries=1, delay=1)
-            if ch_soup:
-                tag = ch_soup.select_one("h1, title")
-                if tag:
-                    title = re.sub(r"\s+", " ", tag.get_text()).strip()
-                    title = re.sub(r"\s*[\|\-–—]\s*MVLEMPYR.*$", "", title, flags=re.IGNORECASE)
-                    title = re.sub(r"\s*-?\s*Chapter\s*\d+.*$", "", title, flags=re.IGNORECASE).strip()
+                title = slug.replace("-", " ").title()
 
         return {
             "title": title or "Без названия",
@@ -331,23 +263,77 @@ class MvlempyrScraper(BaseScraper):
     def get_chapters_list(self, url: str) -> List[dict]:
         book_id, ch_num = self._parse_chapter_url(url)
 
-        if not book_id:
-            book_id = self._get_book_id_with_fallbacks(url)
+        # Загружаем страницу (HTTP → браузер)
+        soup = self._get_soup_with_browser(url)
+
+        if not book_id and soup:
+            book_id = self._find_book_id_from_soup(soup)
 
         if not book_id:
             print("mvlempyr: не удалось определить book_id")
             return []
 
-        print(f"mvlempyr: book_id = {book_id}, начинаем поиск глав...")
+        print(f"mvlempyr: book_id = {book_id}")
 
-        max_ch = self._find_max_chapter(book_id, ch_num or 1)
+        # 1. Попробовать извлечь список глав из HTML (если JS отрендерил)
+        if soup:
+            chapters = self._extract_chapters_from_rendered_html(soup, book_id)
+            if chapters:
+                print(f"mvlempyr: извлечено {len(chapters)} глав из HTML")
+                return sorted(chapters, key=lambda c: int(c["number"]) if c["number"].isdigit() else 0)
 
-        if max_ch < 1:
-            print(f"mvlempyr: не удалось найти доступные главы для book_id={book_id}")
-            return []
+        # 2. Если это страница главы — найти ссылку на новеллу и загрузить её
+        if soup and "/chapter/" in url:
+            novel_url = self._find_novel_url_from_chapter(soup)
+            if novel_url:
+                print(f"mvlempyr: загружаю страницу новеллы: {novel_url}")
+                novel_soup = self._get_soup_with_browser(novel_url)
+                if novel_soup:
+                    chapters = self._extract_chapters_from_rendered_html(novel_soup, book_id)
+                    if chapters:
+                        print(f"mvlempyr: извлечено {len(chapters)} глав со страницы новеллы")
+                        return sorted(chapters, key=lambda c: int(c["number"]) if c["number"].isdigit() else 0)
 
+        # 3. Бинарный поиск через HTTP
+        print("mvlempyr: пробую HTTP-пробинг...")
+        if self._probe_url(f"{self.BASE}/chapter/{book_id}-1"):
+            max_ch = self._find_max_chapter_http(book_id, ch_num or 1)
+            if max_ch > 0:
+                return self._generate_chapter_list(book_id, max_ch)
+
+        # 4. Бинарный поиск через браузер (медленнее, но обходит CloudFlare)
+        print("mvlempyr: HTTP недоступен, бинарный поиск через браузер...")
+        max_ch = self._find_max_chapter_browser(book_id, ch_num or 1)
+        if max_ch > 0:
+            return self._generate_chapter_list(book_id, max_ch)
+
+        print(f"mvlempyr: не удалось найти главы для book_id={book_id}")
+        return []
+
+    def _find_max_chapter_http(self, book_id: int, known_num: int = 1) -> int:
+        """Бинарный поиск через HTTP (быстро, но может не работать при CloudFlare)."""
+        hi = max(known_num, 1)
+        while hi <= 10000:
+            if self._probe_url(f"{self.BASE}/chapter/{book_id}-{hi}"):
+                hi *= 2
+                time.sleep(0.2)
+            else:
+                break
+
+        lo = max(hi // 2, 1)
+        hi = min(hi, 10000)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            time.sleep(0.2)
+            if self._probe_url(f"{self.BASE}/chapter/{book_id}-{mid}"):
+                lo = mid
+            else:
+                hi = mid - 1
+
+        return lo
+
+    def _generate_chapter_list(self, book_id: int, max_ch: int) -> List[dict]:
         print(f"mvlempyr: найдено {max_ch} глав")
-
         chapters = []
         for i in range(1, max_ch + 1):
             chapters.append({
@@ -356,10 +342,9 @@ class MvlempyrScraper(BaseScraper):
                 "url": f"{self.BASE}/chapter/{book_id}-{i}",
                 "volume": "1",
             })
-
         return chapters
 
-    # --- chapter content ------------------------------------------------
+    # --- chapter content --------------------------------------------------
 
     @staticmethod
     def _node_to_text(node) -> str:
@@ -385,13 +370,17 @@ class MvlempyrScraper(BaseScraper):
 
     def get_chapter_text(self, chapter_url: str) -> str:
         time.sleep(0.3)
-        soup = self._get_soup(chapter_url)
+
+        # HTTP → браузер
+        soup = self._get_soup_with_browser(chapter_url)
         if not soup:
             return ""
 
+        # div#chapter, .ct-text-block (из скриншота пользователя)
         selectors = [
             "#chapter",
             "#chapter-content",
+            ".ct-text-block",
             ".chapter-content",
             ".entry-content",
             ".reading-content",
@@ -407,7 +396,7 @@ class MvlempyrScraper(BaseScraper):
                 if text.strip():
                     return text
 
-        # Фолбэк: __NEXT_DATA__
+        # __NEXT_DATA__
         script = soup.find("script", {"id": "__NEXT_DATA__"})
         if script and script.string:
             try:

@@ -2,10 +2,10 @@
 Базовый класс для скраперов сторонних сайтов.
 
 Цепочка фолбэков для обхода защит:
-1. curl_cffi (имитация TLS-отпечатка браузера — главный обход CloudFlare)
+1. curl_cffi (имитация TLS-отпечатка браузера)
 2. cloudscraper
 3. requests с браузерными заголовками
-4. мобильный User-Agent
+4. Chrome пользователя через DrissionPage (с расширениями, VPN и т.д.)
 """
 
 import time
@@ -59,6 +59,15 @@ DEFAULT_UA = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+CF_MARKERS = (
+    "cf-browser-verification",
+    "challenge-platform",
+    "cf-challenge",
+    "Just a moment",
+    "Checking your browser",
+    "Verify you are human",
+)
+
 
 class BaseScraper:
     """Базовый скрапер с цепочкой фолбэков для обхода защит."""
@@ -68,16 +77,16 @@ class BaseScraper:
         self.session.headers.update(DEFAULT_HEADERS)
         self.session.headers["User-Agent"] = DEFAULT_UA
         self._cloudscraper = None
+        self._browser_page = None
         self._setup_headers()
 
     def _setup_headers(self):
         """Переопределяется подклассами для дополнительных заголовков."""
         pass
 
-    # --- fetch methods --------------------------------------------------
+    # --- fetch methods (HTTP) ---------------------------------------------
 
     def _fetch_curl_cffi(self, url: str, timeout: int = 20) -> Optional[str]:
-        """curl_cffi с имитацией Chrome TLS-отпечатка."""
         if not HAS_CURL_CFFI:
             return None
         try:
@@ -119,79 +128,133 @@ class BaseScraper:
             pass
         return None
 
-    def _fetch_browser(self, url: str, timeout: int = 30) -> Optional[str]:
-        """Фолбэк через Chrome (DrissionPage).
+    # --- fetch methods (браузер) ------------------------------------------
 
-        Сначала пробует подключиться к уже запущенному Chrome пользователя
-        (с его расширениями, VPN, куками). Если не удаётся — запускает новый
-        с профилем по умолчанию (не инкогнито).
-        """
+    def _get_browser_page(self) -> Optional["ChromiumPage"]:
+        """Возвращает переиспользуемое подключение к Chrome."""
+        if self._browser_page is not None:
+            try:
+                _ = self._browser_page.url
+                return self._browser_page
+            except Exception:
+                self._browser_page = None
+
         if not HAS_DRISSION:
             return None
 
-        # 1. Подключение к уже запущенному Chrome
-        html = self._fetch_browser_existing(url, timeout)
-        if html:
-            return html
-
-        # 2. Запуск нового Chrome с профилем пользователя
-        html = self._fetch_browser_new(url, timeout)
-        if html:
-            return html
-
-        return None
-
-    def _fetch_browser_existing(self, url: str, timeout: int = 30) -> Optional[str]:
-        """Подключается к уже запущенному Chrome через debug port."""
-        page = None
         try:
             co = ChromiumOptions()
-            co.set_local_port(9222)
-            page = ChromiumPage(co)
+            co.auto_port()
+            self._browser_page = ChromiumPage(co)
+            print("DrissionPage: подключено к Chrome")
+            return self._browser_page
+        except Exception as e:
+            print(f"DrissionPage: не удалось подключиться к Chrome: {e}")
+        return None
+
+    @staticmethod
+    def _is_cloudflare_challenge(html: str) -> bool:
+        if not html:
+            return True
+        for marker in CF_MARKERS:
+            if marker in html:
+                return True
+        return False
+
+    def _fetch_browser(self, url: str, wait: int = 12) -> Optional[str]:
+        """Загружает URL через Chrome пользователя.
+
+        Подключается к уже запущенному Chrome (с расширениями, VPN, куками).
+        Открывает новую вкладку, ждёт рендеринга, забирает HTML, закрывает вкладку.
+        """
+        page = self._get_browser_page()
+        if not page:
+            return None
+
+        tab = None
+        try:
             tab = page.new_tab(url)
-            time.sleep(6)
-            html = tab.html
-            tab.close()
-            if html and len(html) > 500:
-                print(f"DrissionPage (existing Chrome): загружено {len(html)} символов")
+            html = self._wait_for_content(tab, wait)
+            if html and len(html) > 500 and not self._is_cloudflare_challenge(html):
+                print(f"DrissionPage: загружено {len(html)} символов с {url}")
                 return html
-        except Exception:
-            pass
-        return None
-
-    def _fetch_browser_new(self, url: str, timeout: int = 30) -> Optional[str]:
-        """Запускает новый Chrome с профилем пользователя."""
-        page = None
-        try:
-            co = ChromiumOptions()
-            co.set_argument("--disable-gpu")
-            co.set_argument("--no-sandbox")
-            co.set_argument("--disable-blink-features=AutomationControlled")
-            page = ChromiumPage(co)
-            page.set.timeouts(timeout)
-            page.get(url)
-            time.sleep(8)
-            html = page.html
-            if html and len(html) > 500:
-                print(f"DrissionPage: загружено {len(html)} символов")
-                return html
-            print(f"DrissionPage: страница пустая ({len(html) if html else 0} символов)")
+            if html:
+                print(f"DrissionPage: страница пустая или CloudFlare ({len(html)} символов)")
         except Exception as e:
             print(f"DrissionPage: {e}")
         finally:
-            if page:
+            if tab:
                 try:
-                    page.quit()
+                    tab.close()
                 except Exception:
                     pass
         return None
 
+    def _wait_for_content(self, tab, max_wait: int = 15) -> Optional[str]:
+        """Ждёт пока страница прогрузится (CloudFlare challenge + JS рендеринг)."""
+        last_html = ""
+        stable_count = 0
+
+        for i in range(max_wait // 2):
+            time.sleep(2)
+            try:
+                html = tab.html or ""
+            except Exception:
+                return last_html
+
+            if self._is_cloudflare_challenge(html):
+                stable_count = 0
+                last_html = html
+                continue
+
+            if len(html) > 1000:
+                if abs(len(html) - len(last_html)) < 100:
+                    stable_count += 1
+                    if stable_count >= 2:
+                        return html
+                else:
+                    stable_count = 0
+                last_html = html
+
+        return last_html
+
+    def _fetch_browser_quick(self, url: str, wait: int = 4) -> Optional[str]:
+        """Быстрая проверка URL через браузер (для пробинга)."""
+        page = self._get_browser_page()
+        if not page:
+            return None
+
+        tab = None
+        try:
+            tab = page.new_tab(url)
+            time.sleep(wait)
+            html = tab.html
+            if html and len(html) > 500 and not self._is_cloudflare_challenge(html):
+                return html
+        except Exception:
+            pass
+        finally:
+            if tab:
+                try:
+                    tab.close()
+                except Exception:
+                    pass
+        return None
+
+    def close_browser(self):
+        """Закрывает подключение к Chrome."""
+        if self._browser_page:
+            try:
+                self._browser_page.quit()
+            except Exception:
+                pass
+            self._browser_page = None
+
+    # --- unified fetch chain ----------------------------------------------
+
     def _fetch_html(self, url: str, retries: int = 2, delay: int = 2,
                      silent: bool = False) -> Optional[str]:
-        """
-        Цепочка: curl_cffi → cloudscraper → requests.
-        silent=True подавляет сообщение об ошибке (для пробинга).
-        """
+        """Цепочка: curl_cffi → cloudscraper → requests."""
         for attempt in range(retries):
             for fetcher in (
                 self._fetch_curl_cffi,
@@ -209,12 +272,26 @@ class BaseScraper:
         return None
 
     def _probe_url(self, url: str) -> bool:
-        """Тихо проверяет доступность URL (без сообщений об ошибках)."""
+        """Тихо проверяет доступность URL (HTTP only)."""
         html = self._fetch_html(url, retries=1, delay=1, silent=True)
+        return html is not None and len(html) > 500
+
+    def _probe_url_browser(self, url: str) -> bool:
+        """Проверяет доступность URL через браузер."""
+        html = self._fetch_browser_quick(url)
         return html is not None and len(html) > 500
 
     def _get_soup(self, url: str, retries: int = 2, delay: int = 2) -> Optional[BeautifulSoup]:
         html = self._fetch_html(url, retries=retries, delay=delay)
+        if not html:
+            return None
+        return BeautifulSoup(html, "html.parser")
+
+    def _get_soup_with_browser(self, url: str) -> Optional[BeautifulSoup]:
+        """HTTP → браузер. Возвращает BeautifulSoup."""
+        html = self._fetch_html(url, retries=1, delay=1, silent=True)
+        if not html:
+            html = self._fetch_browser(url)
         if not html:
             return None
         return BeautifulSoup(html, "html.parser")
