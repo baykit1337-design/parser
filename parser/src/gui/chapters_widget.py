@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSplitter, QTreeWi
 
 from ..branches import get_formatted_branches_with_teams
 from .chapter_tree import ChapterTree
+from .chapter_delegate import TEAM_NAME_ROLE, SINGLE_LINE_ITEM_ROLE
 from .filter_widget import TranslationFilterWidget
 from .settings_widget import SettingsWidget
 
@@ -167,6 +168,9 @@ class ChaptersWidget(QWidget):
             ch_item.setFlags(ch_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             ch_item.setCheckState(0, Qt.CheckState.Checked)
             ch_item.setData(0, Qt.ItemDataRole.UserRole, ch)
+            ch_item.setData(1, Qt.ItemDataRole.UserRole, "0")
+            ch_item.setData(0, TEAM_NAME_ROLE, "External")
+            ch_item.setData(0, SINGLE_LINE_ITEM_ROLE, True)
             vol_item.addChild(ch_item)
 
         vol_item.setExpanded(True)

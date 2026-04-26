@@ -538,9 +538,14 @@ class MainWindow(QMainWindow):
 
         # Внешний сайт (webnovel/mvlempyr)
         if self.current_site_type in (SITE_WEBNOVEL, SITE_MVLEMPYR) and self.external_chapters:
+            selected = self.chapters_widget.get_selected_chapters()
+            chapters_to_download = [s["chapter"] for s in selected] if selected else self.external_chapters
+            if not chapters_to_download:
+                show_error_message(self, "Ошибка", "Не выбрано ни одной главы для загрузки")
+                return
             dialog = ExternalDownloadDialog(
                 self.external_book_info,
-                self.external_chapters,
+                chapters_to_download,
                 self.current_site_type,
                 save_dir,
                 self,
