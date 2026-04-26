@@ -202,12 +202,14 @@ class ExternalDownloadWorker(QThread):
     finished = pyqtSignal(list)
     error = pyqtSignal(str)
 
-    def __init__(self, book_info, chapters, site_type, save_dir):
+    def __init__(self, book_info, chapters, site_type, save_dir, scraper=None):
         super().__init__()
         self.book_info = book_info
         self.chapters = chapters
         self.site_type = site_type
         self.save_dir = save_dir
+        self.actual_save_dir = save_dir
+        self.scraper = scraper
         self.is_cancelled = False
         self.start_time = 0
         self.created_files = []
@@ -230,7 +232,9 @@ class ExternalDownloadWorker(QThread):
     def _download_chapters(self):
         from ..scrapers.site_detector import SITE_WEBNOVEL, SITE_MVLEMPYR
 
-        if self.site_type == SITE_WEBNOVEL:
+        if self.scraper:
+            scraper = self.scraper
+        elif self.site_type == SITE_WEBNOVEL:
             from ..scrapers.webnovel import WebnovelScraper
             scraper = WebnovelScraper()
         else:
@@ -244,6 +248,7 @@ class ExternalDownloadWorker(QThread):
         safe_book_title = re.sub(r'[\\/*?:"<>|]', "", book_title).strip()
         chapter_save_dir = os.path.join(self.save_dir, safe_book_title)
         os.makedirs(chapter_save_dir, exist_ok=True)
+        self.actual_save_dir = chapter_save_dir
         self.progress_update.emit(f"Папка: {safe_book_title}/", 0)
 
         for i, chapter in enumerate(self.chapters):
@@ -490,8 +495,11 @@ class DownloadDialog(QDialog):
             self.accept()
 
     def _open_folder(self):
-        if os.path.isdir(self.save_dir):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(self.save_dir)))
+        folder = self.save_dir
+        if self.download_worker and hasattr(self.download_worker, 'actual_save_dir'):
+            folder = self.download_worker.actual_save_dir
+        if os.path.isdir(folder):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(folder)))
 
     def _on_download_error(self, error_message: str):
         self.log_text.append(f"<span style='color: #ff0040;'><b>Ошибка:</b> {error_message}</span>")
@@ -516,12 +524,13 @@ class DownloadDialog(QDialog):
 class ExternalDownloadDialog(QDialog):
     """Диалог для загрузки глав с внешних сайтов (webnovel, mvlempyr)"""
 
-    def __init__(self, book_info, chapters, site_type, save_dir, parent=None):
+    def __init__(self, book_info, chapters, site_type, save_dir, parent=None, scraper=None):
         super().__init__(parent)
         self.book_info = book_info
         self.chapters = chapters
         self.site_type = site_type
         self.save_dir = save_dir
+        self.scraper = scraper
 
         self.download_worker = None
         self.created_files = []
@@ -592,7 +601,8 @@ class ExternalDownloadDialog(QDialog):
         self.log_text.append("─" * 50)
 
         self.download_worker = ExternalDownloadWorker(
-            self.book_info, self.chapters, self.site_type, self.save_dir
+            self.book_info, self.chapters, self.site_type, self.save_dir,
+            scraper=self.scraper,
         )
 
         self.download_worker.progress_update.connect(self._on_progress_update)
@@ -667,8 +677,11 @@ class ExternalDownloadDialog(QDialog):
             self.accept()
 
     def _open_folder(self):
-        if os.path.isdir(self.save_dir):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(self.save_dir)))
+        folder = self.save_dir
+        if self.download_worker and hasattr(self.download_worker, 'actual_save_dir'):
+            folder = self.download_worker.actual_save_dir
+        if os.path.isdir(folder):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(folder)))
 
     def _on_download_error(self, error_message: str):
         self.log_text.append(f"<span style='color: #ff0040;'><b>Ошибка:</b> {error_message}</span>")
