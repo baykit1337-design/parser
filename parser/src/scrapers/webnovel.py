@@ -122,12 +122,38 @@ class WebnovelScraper(BaseScraper):
         return ""
 
     def _try_csrf_browser(self) -> str:
-        """Получает CSRF token через реальный браузер."""
-        from .base import HAS_DRISSION
+        """Получает CSRF через Chrome — сначала существующий, потом новый."""
         if not HAS_DRISSION:
             return ""
+
+        from DrissionPage import ChromiumPage, ChromiumOptions
+
+        # 1. Подключение к уже запущенному Chrome (с расширениями/VPN)
         try:
-            from DrissionPage import ChromiumPage, ChromiumOptions
+            co = ChromiumOptions()
+            co.set_local_port(9222)
+            page = ChromiumPage(co)
+            tab = page.new_tab(f"{self.BASE}/stories/novel")
+            time.sleep(6)
+            cookies = tab.cookies()
+            tab.close()
+
+            for c in cookies:
+                name = c.get("name", "")
+                value = c.get("value", "")
+                self._cookies[name] = value
+                if name == "_csrfToken":
+                    self._csrf_token = value
+
+            if self._csrf_token:
+                print("webnovel: CSRF token получен через существующий Chrome")
+                return self._csrf_token
+        except Exception:
+            pass
+
+        # 2. Новый Chrome
+        page = None
+        try:
             co = ChromiumOptions()
             co.set_argument("--disable-gpu")
             co.set_argument("--no-sandbox")
@@ -138,7 +164,6 @@ class WebnovelScraper(BaseScraper):
             time.sleep(8)
 
             cookies = page.cookies()
-            page.quit()
 
             for c in cookies:
                 name = c.get("name", "")
@@ -148,10 +173,16 @@ class WebnovelScraper(BaseScraper):
                     self._csrf_token = value
 
             if self._csrf_token:
-                print(f"webnovel: CSRF token получен через браузер")
+                print("webnovel: CSRF token получен через новый Chrome")
                 return self._csrf_token
         except Exception as e:
             print(f"webnovel: браузер не смог получить CSRF: {e}")
+        finally:
+            if page:
+                try:
+                    page.quit()
+                except Exception:
+                    pass
         return ""
 
     # --- API requests -----------------------------------------------------

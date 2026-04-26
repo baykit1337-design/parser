@@ -120,9 +120,47 @@ class BaseScraper:
         return None
 
     def _fetch_browser(self, url: str, timeout: int = 30) -> Optional[str]:
-        """Фолбэк через реальный Chrome (DrissionPage) — обходит любую защиту."""
+        """Фолбэк через Chrome (DrissionPage).
+
+        Сначала пробует подключиться к уже запущенному Chrome пользователя
+        (с его расширениями, VPN, куками). Если не удаётся — запускает новый
+        с профилем по умолчанию (не инкогнито).
+        """
         if not HAS_DRISSION:
             return None
+
+        # 1. Подключение к уже запущенному Chrome
+        html = self._fetch_browser_existing(url, timeout)
+        if html:
+            return html
+
+        # 2. Запуск нового Chrome с профилем пользователя
+        html = self._fetch_browser_new(url, timeout)
+        if html:
+            return html
+
+        return None
+
+    def _fetch_browser_existing(self, url: str, timeout: int = 30) -> Optional[str]:
+        """Подключается к уже запущенному Chrome через debug port."""
+        page = None
+        try:
+            co = ChromiumOptions()
+            co.set_local_port(9222)
+            page = ChromiumPage(co)
+            tab = page.new_tab(url)
+            time.sleep(6)
+            html = tab.html
+            tab.close()
+            if html and len(html) > 500:
+                print(f"DrissionPage (existing Chrome): загружено {len(html)} символов")
+                return html
+        except Exception:
+            pass
+        return None
+
+    def _fetch_browser_new(self, url: str, timeout: int = 30) -> Optional[str]:
+        """Запускает новый Chrome с профилем пользователя."""
         page = None
         try:
             co = ChromiumOptions()
@@ -132,7 +170,6 @@ class BaseScraper:
             page = ChromiumPage(co)
             page.set.timeouts(timeout)
             page.get(url)
-            # Ждём загрузки контента (CloudFlare challenge ~5 сек)
             time.sleep(8)
             html = page.html
             if html and len(html) > 500:

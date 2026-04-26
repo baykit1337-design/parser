@@ -213,11 +213,80 @@ class MvlempyrScraper(BaseScraper):
 
     # --- public API -----------------------------------------------------
 
+    @staticmethod
+    def _extract_slug(url: str) -> Optional[str]:
+        """Извлекает slug из URL /novel/{slug}."""
+        m = re.search(r"/novel/([a-z0-9\-]+)", url, re.IGNORECASE)
+        return m.group(1) if m else None
+
+    def _title_from_slug(self, slug: str) -> str:
+        """Превращает slug в читаемое название."""
+        return slug.replace("-", " ").title()
+
+    def _get_book_id_with_fallbacks(self, url: str) -> Optional[int]:
+        """Ищет book_id всеми способами."""
+        book_id, ch_num = self._parse_chapter_url(url)
+        if book_id:
+            return book_id
+
+        # 1. HTTP — загрузить страницу книги
+        soup = self._get_soup(url, retries=1, delay=1)
+        if soup:
+            book_id = self._find_book_id_from_page(soup)
+            if book_id:
+                return book_id
+
+        # 2. Браузер — загрузить страницу через Chrome пользователя
+        from .base import HAS_DRISSION
+        if HAS_DRISSION:
+            print("mvlempyr: HTTP не работает, пробую через браузер...")
+            html = self._fetch_browser(url)
+            if html:
+                soup = BeautifulSoup(html, "html.parser")
+                book_id = self._find_book_id_from_page(soup)
+                if book_id:
+                    return book_id
+
+        # 3. Брутфорс — пробуем популярные id (последние книги имеют id 6000-9000)
+        slug = self._extract_slug(url)
+        if slug:
+            print(f"mvlempyr: пробую подобрать book_id для '{slug}'...")
+            book_id = self._bruteforce_book_id(slug)
+            if book_id:
+                return book_id
+
+        return None
+
+    def _bruteforce_book_id(self, slug: str) -> Optional[int]:
+        """Пробует загрузить первую главу с разными book_id,
+        проверяя что slug совпадает с названием в HTML."""
+        # Пробуем загрузить страницу /chapter/{id}-1 для нескольких id
+        # mvlempyr перенаправляет или показывает slug в HTML
+        # Диапазон последних книг: примерно 5000-9000
+        for test_id in range(9000, 4000, -50):
+            url = f"{self.BASE}/chapter/{test_id}-1"
+            html = self._fetch_html(url, retries=1, delay=0, silent=True)
+            if html and len(html) > 500:
+                if slug.replace("-", " ").lower() in html.lower():
+                    print(f"mvlempyr: book_id={test_id} соответствует slug '{slug}'")
+                    return test_id
+            time.sleep(0.1)
+        return None
+
     def get_book_info(self, url: str) -> dict:
         book_id, ch_num = self._parse_chapter_url(url)
 
-        soup = self._get_soup(url)
         title = None
+        soup = None
+
+        # Попробуем загрузить страницу
+        soup = self._get_soup(url, retries=1, delay=1)
+        if not soup:
+            from .base import HAS_DRISSION
+            if HAS_DRISSION:
+                html = self._fetch_browser(url)
+                if html:
+                    soup = BeautifulSoup(html, "html.parser")
 
         if soup:
             for sel in ("h1", ".novel-title", ".entry-title", "title"):
@@ -233,6 +302,26 @@ class MvlempyrScraper(BaseScraper):
             if not book_id:
                 book_id = self._find_book_id_from_page(soup)
 
+        # Если book_id не нашли через HTML — используем фолбэки
+        if not book_id:
+            book_id = self._get_book_id_with_fallbacks(url)
+
+        # Если title не нашли — из slug
+        if not title:
+            slug = self._extract_slug(url)
+            if slug:
+                title = self._title_from_slug(slug)
+
+        # Если есть book_id но нет title — из первой главы
+        if not title and book_id:
+            ch_soup = self._get_soup(f"{self.BASE}/chapter/{book_id}-1", retries=1, delay=1)
+            if ch_soup:
+                tag = ch_soup.select_one("h1, title")
+                if tag:
+                    title = re.sub(r"\s+", " ", tag.get_text()).strip()
+                    title = re.sub(r"\s*[\|\-–—]\s*MVLEMPYR.*$", "", title, flags=re.IGNORECASE)
+                    title = re.sub(r"\s*-?\s*Chapter\s*\d+.*$", "", title, flags=re.IGNORECASE).strip()
+
         return {
             "title": title or "Без названия",
             "url": url,
@@ -243,12 +332,10 @@ class MvlempyrScraper(BaseScraper):
         book_id, ch_num = self._parse_chapter_url(url)
 
         if not book_id:
-            soup = self._get_soup(url)
-            if soup:
-                book_id = self._find_book_id_from_page(soup)
+            book_id = self._get_book_id_with_fallbacks(url)
 
         if not book_id:
-            print("mvlempyr: не удалось определить book_id из страницы")
+            print("mvlempyr: не удалось определить book_id")
             return []
 
         print(f"mvlempyr: book_id = {book_id}, начинаем поиск глав...")
