@@ -392,8 +392,7 @@ class MainWindow(QMainWindow):
             )
             self.info_icon_label.setVisible(True)
 
-        self.chapters_widget.clear()
-        self.chapters_widget._update_stats_label(ch_count, ch_count)
+        self.chapters_widget.update_external_chapters(chapters)
         self.statusbar.showMessage(
             f"Загружено: {title} — {ch_count} глав ({site_name})", 5000
         )

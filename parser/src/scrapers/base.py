@@ -119,25 +119,34 @@ class BaseScraper:
             pass
         return None
 
-    def _fetch_browser(self, url: str, timeout: int = 20) -> Optional[str]:
+    def _fetch_browser(self, url: str, timeout: int = 30) -> Optional[str]:
         """Фолбэк через реальный Chrome (DrissionPage) — обходит любую защиту."""
         if not HAS_DRISSION:
             return None
+        page = None
         try:
             co = ChromiumOptions()
-            co.headless()
             co.set_argument("--disable-gpu")
             co.set_argument("--no-sandbox")
+            co.set_argument("--disable-blink-features=AutomationControlled")
             page = ChromiumPage(co)
             page.set.timeouts(timeout)
             page.get(url)
-            time.sleep(3)
+            # Ждём загрузки контента (CloudFlare challenge ~5 сек)
+            time.sleep(8)
             html = page.html
-            page.quit()
-            if html and len(html) > 200:
+            if html and len(html) > 500:
+                print(f"DrissionPage: загружено {len(html)} символов")
                 return html
+            print(f"DrissionPage: страница пустая ({len(html) if html else 0} символов)")
         except Exception as e:
             print(f"DrissionPage: {e}")
+        finally:
+            if page:
+                try:
+                    page.quit()
+                except Exception:
+                    pass
         return None
 
     def _fetch_html(self, url: str, retries: int = 2, delay: int = 2,
