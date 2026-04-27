@@ -232,6 +232,11 @@ class MvlempyrScraper(BaseScraper):
 
     # --- chapters list ----------------------------------------------------
 
+    @staticmethod
+    def _compute_tag_id(book_id: int) -> int:
+        """tagId = pow(7, book_id, 1999999997) — формула из chbbv14.js."""
+        return pow(7, book_id, 1999999997)
+
     def get_chapters_list(self, url: str) -> List[dict]:
         book_id, ch_num = self._parse_chapter_url(url)
 
@@ -243,121 +248,186 @@ class MvlempyrScraper(BaseScraper):
             )
             return []
 
-        # Если URL — страница новеллы (/novel/...), нужно сначала найти
-        # URL главы, т.к. JS оглавления работает только на /chapter/
-        chapter_url = url
+        # Если URL — /novel/..., ищем book_id и строим /chapter/ URL
         if "/chapter/" not in url:
-            chapter_url = self._find_chapter_url_from_novel(url, book_id)
-            if not chapter_url:
-                print("mvlempyr: не удалось найти ссылку на главу со страницы новеллы")
-                return []
-
-        # Открываем страницу главы
-        print("mvlempyr: открываю страницу главы...")
-        tab = self._open_tab_and_load(chapter_url, max_wait=90)
-        if not tab:
-            return []
-
-        try:
-            # Извлекаем book_id из HTML если ещё нет
-            if not book_id:
-                try:
-                    html = tab.html or ""
-                    soup = BeautifulSoup(html, "html.parser")
-                    book_id = self._find_book_id_from_soup(soup)
-                except Exception:
-                    pass
-            if not book_id:
-                book_id, _ = self._parse_chapter_url(chapter_url)
+            book_id = self._resolve_book_id_from_novel(url)
             if not book_id:
                 print("mvlempyr: не удалось определить book_id")
                 return []
 
-            print(f"mvlempyr: book_id = {book_id}")
+        if not book_id:
+            print("mvlempyr: не удалось определить book_id из URL")
+            return []
 
-            # 2. Ждём пока JS сайта установит window.tagId и window.totalChapters
-            tag_id = None
-            total_chapters = 0
-            print("mvlempyr: жду инициализацию JS сайта (tagId, totalChapters)...")
+        tag_id = self._compute_tag_id(book_id)
+        print(f"mvlempyr: book_id={book_id}, tagId={tag_id}")
 
-            for i in range(40):  # до 120 сек
-                time.sleep(3)
-                try:
-                    tag_id = tab.run_js("return window.tagId || null")
-                    total_chapters = tab.run_js("return window.totalChapters || 0")
-                except Exception:
-                    continue
+        # Открываем любую страницу mvlempyr чтобы браузер прошёл CloudFlare
+        # и у нас появился контекст для fetch к heliosarchive.online
+        print("mvlempyr: открываю страницу для получения сессии браузера...")
+        tab = self._open_tab_and_load(url, max_wait=90)
+        if not tab:
+            return []
 
-                if tag_id and total_chapters and int(total_chapters) > 0:
-                    print(f"mvlempyr: tagId={tag_id}, totalChapters={total_chapters}")
-                    break
-
-                if i > 0 and i % 10 == 0:
-                    print(f"  ещё жду... ({i * 3}s)")
-            else:
-                print(f"mvlempyr: JS не инициализировался (tagId={tag_id}, total={total_chapters})")
-                # Фолбэк — попробуем из HTML
+        try:
+            # Сначала узнаём сколько всего глав (один лёгкий запрос)
+            print("mvlempyr: запрашиваю количество глав через API...")
+            total = self._fetch_total_chapters(tab, tag_id)
+            if not total or total <= 0:
+                print("mvlempyr: API не вернул количество глав, пробую фолбэк...")
                 return self._fallback_chapters_from_html(tab, book_id)
 
-            # 3. Триггерим загрузку оглавления
-            print("mvlempyr: триггерю загрузку оглавления...")
-            try:
-                tab.run_js(
-                    "if(window.refreshChapterListPanelIfNeeded) "
-                    "window.refreshChapterListPanelIfNeeded();"
-                    "else document.querySelector('.slide-in-button')?.click();"
-                )
-            except Exception as e:
-                print(f"mvlempyr: ошибка при триггере: {e}")
-                try:
-                    tab.run_js("document.querySelector('.slide-in-button')?.click()")
-                except Exception:
-                    pass
+            print(f"mvlempyr: всего глав: {total}")
 
-            # 4. Ждём пока #content заполнится .chapter-item элементами
-            print("mvlempyr: жду загрузку списка глав...")
-            loaded_count = 0
-            for i in range(40):  # до 120 сек
-                time.sleep(3)
-                try:
-                    count = tab.run_js(
-                        "return document.querySelectorAll('#content .chapter-item').length"
-                    )
-                except Exception:
-                    continue
-
-                if count and int(count) > 0:
-                    if int(count) == loaded_count and loaded_count > 0:
-                        # Стабилизировалось — все главы загружены
-                        print(f"mvlempyr: загружено {count} глав в оглавление")
-                        break
-                    loaded_count = int(count)
-                    if i > 0 and i % 5 == 0:
-                        print(f"  загружается... {loaded_count} глав ({i * 3}s)")
-                elif i > 0 and i % 10 == 0:
-                    print(f"  ещё жду... ({i * 3}s)")
-            else:
-                if loaded_count > 0:
-                    print(f"mvlempyr: загружено {loaded_count} глав (таймаут, но данные есть)")
-                else:
-                    print("mvlempyr: главы не загрузились в #content")
-                    return self._fallback_chapters_from_html(tab, book_id)
-
-            # 5. Извлекаем данные глав через JS (быстрее чем парсить HTML)
-            chapters = self._extract_chapters_from_dom(tab, book_id)
+            # Загружаем все главы через API (по 500 за запрос)
+            chapters = self._fetch_all_chapters(tab, tag_id, total, book_id)
             if chapters:
-                print(f"mvlempyr: извлечено {len(chapters)} глав")
+                print(f"mvlempyr: получено {len(chapters)} глав из API")
                 return chapters
 
-            print("mvlempyr: не удалось извлечь главы из DOM")
+            print("mvlempyr: API не вернул данные, пробую фолбэк...")
             return self._fallback_chapters_from_html(tab, book_id)
-
         finally:
             self._close_tab(tab)
 
-    def _find_chapter_url_from_novel(self, novel_url: str, book_id: Optional[int]) -> Optional[str]:
-        """Загружает страницу новеллы и ищет ссылку на первую главу."""
-        print("mvlempyr: загружаю страницу новеллы для поиска главы...")
+    def _fetch_total_chapters(self, tab, tag_id: int) -> int:
+        """Делает fetch к WP API из контекста браузера, получает X-WP-Total."""
+        api_url = (
+            f"https://chap.heliosarchive.online/wp-json/wp/v2/posts"
+            f"?tags={tag_id}&per_page=1"
+        )
+        js = f"""
+            try {{
+                var resp = await fetch('{api_url}');
+                if (!resp.ok) return 'ERR:' + resp.status + ':' + (await resp.text());
+                var total = resp.headers.get('X-WP-Total') || '0';
+                return total;
+            }} catch(e) {{
+                return 'ERR:' + e.message;
+            }}
+        """
+        for attempt in range(3):
+            try:
+                result = tab.run_js(js)
+            except Exception as e:
+                print(f"  run_js ошибка (попытка {attempt + 1}): {e}")
+                time.sleep(3)
+                continue
+
+            if not result:
+                print(f"  пустой ответ (попытка {attempt + 1})")
+                time.sleep(3)
+                continue
+
+            result = str(result)
+            if result.startswith("ERR:"):
+                print(f"  API ошибка: {result}")
+                time.sleep(3)
+                continue
+
+            try:
+                return int(result)
+            except ValueError:
+                print(f"  неожиданный ответ: {result}")
+                time.sleep(3)
+
+        return 0
+
+    def _fetch_all_chapters(self, tab, tag_id: int, total: int,
+                            book_id: int) -> List[dict]:
+        """Загружает все посты-главы через WP API, по 500 за страницу."""
+        pages_needed = (total + 499) // 500
+        all_posts = []
+
+        for page_num in range(1, pages_needed + 1):
+            api_url = (
+                f"https://chap.heliosarchive.online/wp-json/wp/v2/posts"
+                f"?tags={tag_id}&per_page=500&page={page_num}"
+            )
+            print(f"  загрузка страницы {page_num}/{pages_needed}...")
+
+            js = f"""
+                try {{
+                    var resp = await fetch('{api_url}');
+                    if (!resp.ok) return 'ERR:' + resp.status;
+                    var data = await resp.json();
+                    var result = [];
+                    for (var i = 0; i < data.length; i++) {{
+                        var p = data[i];
+                        var acf = p.acf || {{}};
+                        result.push({{
+                            ch_name: acf.ch_name || p.title?.rendered || '',
+                            ch_num: acf.chapter_number || '',
+                            link: p.link || '',
+                            slug: p.slug || '',
+                            date: p.date || ''
+                        }});
+                    }}
+                    return JSON.stringify(result);
+                }} catch(e) {{
+                    return 'ERR:' + e.message;
+                }}
+            """
+            posts_json = None
+            for attempt in range(3):
+                try:
+                    posts_json = tab.run_js(js)
+                except Exception as e:
+                    print(f"    ошибка (попытка {attempt + 1}): {e}")
+                    time.sleep(5)
+                    continue
+
+                if posts_json and not str(posts_json).startswith("ERR:"):
+                    break
+                print(f"    {posts_json} (попытка {attempt + 1})")
+                time.sleep(5)
+
+            if not posts_json or str(posts_json).startswith("ERR:"):
+                print(f"  не удалось загрузить страницу {page_num}")
+                continue
+
+            try:
+                posts = json.loads(posts_json)
+                all_posts.extend(posts)
+                print(f"  получено {len(posts)} постов")
+            except Exception as e:
+                print(f"  ошибка парсинга JSON: {e}")
+
+        if not all_posts:
+            return []
+
+        # Сортируем по chapter_number и строим список
+        all_posts.sort(
+            key=lambda p: int(p.get("ch_num") or "0") if str(p.get("ch_num", "")).isdigit() else 0
+        )
+
+        chapters = []
+        for idx, post in enumerate(all_posts):
+            ch_num = post.get("ch_num", "")
+            if not ch_num or not str(ch_num).isdigit():
+                ch_num = str(idx + 1)
+            ch_name = post.get("ch_name", "") or f"Chapter {ch_num}"
+            link = post.get("link", "")
+
+            if link:
+                from urllib.parse import urlparse
+                path = urlparse(link).path.rstrip("/")
+                chapter_url = f"{self.BASE}{path}"
+            else:
+                chapter_url = f"{self.BASE}/chapter/{book_id}-{ch_num}"
+
+            chapters.append({
+                "number": str(ch_num),
+                "name": ch_name,
+                "url": chapter_url,
+                "volume": "1",
+            })
+
+        return chapters
+
+    def _resolve_book_id_from_novel(self, novel_url: str) -> Optional[int]:
+        """Загружает страницу новеллы и ищет book_id."""
+        print("mvlempyr: загружаю страницу новеллы...")
         tab = self._open_tab_and_load(novel_url, max_wait=60)
         if not tab:
             return None
@@ -365,76 +435,12 @@ class MvlempyrScraper(BaseScraper):
         try:
             html = tab.html or ""
             soup = BeautifulSoup(html, "html.parser")
-
-            for a in soup.select("a[href]"):
-                href = a.get("href", "")
-                if "/chapter/" in href:
-                    return urljoin(self.BASE, href)
-
-            # Попробуем найти book_id и сконструировать URL
-            if not book_id:
-                book_id = self._find_book_id_from_soup(soup)
-            if book_id:
-                return f"{self.BASE}/chapter/{book_id}-1"
-
-            return None
+            return self._find_book_id_from_soup(soup)
         finally:
             self._close_tab(tab)
 
-    def _extract_chapters_from_dom(self, tab, book_id: int) -> List[dict]:
-        """Извлекает список глав напрямую из DOM через JS."""
-        try:
-            data_json = tab.run_js("""
-                var items = document.querySelectorAll('#content .chapter-item');
-                var result = [];
-                items.forEach(function(item, idx) {
-                    var h1 = item.querySelector('h1');
-                    var dateSpan = item.querySelector('.chapter-date');
-                    result.push({
-                        href: item.getAttribute('href') || '',
-                        name: h1 ? h1.textContent.trim() : item.textContent.trim(),
-                        index: item.dataset.listingIndex || String(idx),
-                        date: dateSpan ? dateSpan.textContent.trim() : ''
-                    });
-                });
-                return JSON.stringify(result);
-            """)
-        except Exception as e:
-            print(f"mvlempyr: ошибка извлечения из DOM: {e}")
-            return []
-
-        if not data_json:
-            return []
-
-        try:
-            items = json.loads(data_json)
-        except Exception:
-            return []
-
-        chapters = []
-        for item in items:
-            href = item.get("href", "")
-            name = item.get("name", "")
-            idx = item.get("index", str(len(chapters)))
-
-            # Убираем "123. " из начала названия
-            clean_name = re.sub(r"^\d+\.\s*", "", name).strip()
-
-            full_url = urljoin(self.BASE, href) if href else ""
-            m = re.search(r"/chapter/\d+-(\d+)", href)
-            ch_num = m.group(1) if m else str(int(idx) + 1)
-
-            chapters.append({
-                "number": ch_num,
-                "name": clean_name or f"Chapter {ch_num}",
-                "url": full_url,
-                "volume": "1",
-            })
-
-        return chapters
-
     def _fallback_chapters_from_html(self, tab, book_id: int) -> List[dict]:
-        """Фолбэк: парсим что есть в HTML."""
+        """Фолбэк: парсим ссылки на главы из HTML."""
         try:
             html = tab.html or ""
         except Exception:
@@ -468,7 +474,7 @@ class MvlempyrScraper(BaseScraper):
 
         if chapters:
             chapters.sort(key=lambda c: int(c["number"]) if c["number"].isdigit() else 0)
-            print(f"mvlempyr: фолбэк — извлечено {len(chapters)} глав из HTML ссылок")
+            print(f"mvlempyr: фолбэк — {len(chapters)} глав из HTML")
 
         return chapters
 
