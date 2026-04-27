@@ -30,6 +30,10 @@ class MvlempyrScraper(BaseScraper):
 
     BASE = "https://www.mvlempyr.io"
 
+    def __init__(self):
+        super().__init__()
+        self._api_tab = None
+
     def _setup_headers(self):
         self.session.headers.update({
             "Referer": "https://www.mvlempyr.io/",
@@ -269,8 +273,10 @@ class MvlempyrScraper(BaseScraper):
         if not tab:
             return []
 
+        # Сохраняем вкладку сразу — пригодится для скачивания глав
+        self._api_tab = tab
+
         try:
-            # Сначала узнаём сколько всего глав (один лёгкий запрос)
             print("mvlempyr: запрашиваю количество глав через API...")
             total = self._fetch_total_chapters(tab, tag_id)
             if not total or total <= 0:
@@ -279,7 +285,6 @@ class MvlempyrScraper(BaseScraper):
 
             print(f"mvlempyr: всего глав: {total}")
 
-            # Загружаем все главы через API (по 500 за запрос)
             chapters = self._fetch_all_chapters(tab, tag_id, total, book_id)
             if chapters:
                 print(f"mvlempyr: получено {len(chapters)} глав из API")
@@ -287,8 +292,10 @@ class MvlempyrScraper(BaseScraper):
 
             print("mvlempyr: API не вернул данные, пробую фолбэк...")
             return self._fallback_chapters_from_html(tab, book_id)
-        finally:
+        except Exception:
             self._close_tab(tab)
+            self._api_tab = None
+            raise
 
     @staticmethod
     def _sync_xhr_js(api_url: str, parse_mode: str = "header") -> str:
@@ -493,107 +500,88 @@ class MvlempyrScraper(BaseScraper):
 
     # --- chapter content --------------------------------------------------
 
-    def get_chapter_text(self, chapter_url: str) -> str:
-        time.sleep(0.5)
+    def _ensure_api_tab(self):
+        """Возвращает постоянную вкладку для API-запросов.
 
-        tab = self._open_tab_and_load(chapter_url, max_wait=90)
+        Одна вкладка на весь сеанс скачивания. Не открывает новые.
+        """
+        if self._api_tab is not None:
+            try:
+                _ = self._api_tab.url
+                return self._api_tab
+            except Exception:
+                self._api_tab = None
+
+        print("mvlempyr: открываю вкладку для API-запросов...")
+        self._api_tab = self._open_tab_and_load(
+            f"{self.BASE}/chapter/1-1", max_wait=90
+        )
+        return self._api_tab
+
+    def close_browser(self):
+        """Закрывает API-вкладку и браузер."""
+        if self._api_tab:
+            self._close_tab(self._api_tab)
+            self._api_tab = None
+        super().close_browser()
+
+    def get_chapter_text(self, chapter_url: str) -> str:
+        """Загружает текст главы через WordPress API (без открытия страниц)."""
+        m = re.search(r"/chapter/(\d+-\d+)", chapter_url)
+        if not m:
+            return ""
+        slug = m.group(1)
+
+        tab = self._ensure_api_tab()
         if not tab:
             return ""
 
-        try:
-            # Ждём появления реального контента (не "LOADING")
-            text = self._wait_for_chapter_content(tab, max_wait=60)
-            return text
-        finally:
-            self._close_tab(tab)
-
-    def _wait_for_chapter_content(self, tab, max_wait: int = 60) -> str:
-        """Ждёт пока текст главы реально появится в DOM.
-
-        Проверяет #chapter-content .ct-text-block на наличие
-        текстовых параграфов. Не закрывает вкладку — caller управляет.
+        api_url = (
+            f"https://chap.heliosarchive.online/wp-json/wp/v2/posts"
+            f"?slug={slug}&_fields=content"
+        )
+        js = f"""
+            try {{
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', '{api_url}', false);
+                xhr.send();
+                if (xhr.status !== 200) return 'ERR:' + xhr.status;
+                var data = JSON.parse(xhr.responseText);
+                if (!data.length) return 'ERR:no_post';
+                var html = data[0].content && data[0].content.rendered || '';
+                if (!html) return 'ERR:no_content';
+                var div = document.createElement('div');
+                div.innerHTML = html;
+                var ps = div.querySelectorAll('p');
+                var texts = [];
+                for (var i = 0; i < ps.length; i++) {{
+                    var t = ps[i].textContent.trim();
+                    if (t.length > 1) texts.push(t);
+                }}
+                if (texts.length > 0) return texts.join('\\n');
+                return div.textContent.trim();
+            }} catch(e) {{
+                return 'ERR:' + e.message;
+            }}
         """
-        checks = max_wait // 3
-        best_text = ""
-
-        for i in range(checks):
-            time.sleep(3)
-
+        for attempt in range(3):
             try:
-                result = tab.run_js("""
-                    var selectors = [
-                        '#chapter-content .ct-text-block',
-                        '#chapter-content',
-                        '#chapter',
-                        '.chapter-content',
-                        '.entry-content',
-                        'article',
-                        'main'
-                    ];
-                    for (var s = 0; s < selectors.length; s++) {
-                        var node = document.querySelector(selectors[s]);
-                        if (!node) continue;
-                        var ps = node.querySelectorAll('p');
-                        var texts = [];
-                        for (var j = 0; j < ps.length; j++) {
-                            var t = ps[j].textContent.trim();
-                            if (t.length > 1) texts.push(t);
-                        }
-                        if (texts.length > 0) {
-                            return JSON.stringify({
-                                selector: selectors[s],
-                                count: texts.length,
-                                totalLen: texts.join('').length,
-                                text: texts.join('\\n')
-                            });
-                        }
-                    }
-                    return null;
-                """)
-            except Exception:
+                result = tab.run_js(js, timeout=120)
+            except Exception as e:
+                print(f"  XHR ошибка главы {slug} (попытка {attempt + 1}): {e}")
+                time.sleep(3)
                 continue
 
             if not result:
-                if i > 0 and i % 5 == 0:
-                    print(f"  контент ещё не загружен... ({i * 3}s)")
+                time.sleep(2)
                 continue
 
-            try:
-                data = json.loads(result)
-            except Exception:
+            result = str(result)
+            if result.startswith("ERR:"):
+                print(f"  API ошибка главы {slug}: {result}")
+                time.sleep(2)
                 continue
 
-            text = data.get("text", "")
-            total_len = data.get("totalLen", 0)
-            count = data.get("count", 0)
+            return result
 
-            # Проверяем что это реальный контент, а не заглушка
-            if total_len < 50 or count < 2:
-                continue
-
-            # Проверяем что это не "Loading..." текст
-            if "loading" in text.lower()[:100]:
-                continue
-
-            # Контент есть и он реальный
-            if len(text) >= len(best_text):
-                best_text = text
-
-            # Ждём ещё один цикл чтобы убедиться что контент стабилен
-            if best_text and i > 0:
-                time.sleep(3)
-                try:
-                    result2 = tab.run_js("""
-                        var node = document.querySelector('#chapter-content .ct-text-block')
-                                || document.querySelector('#chapter-content')
-                                || document.querySelector('#chapter');
-                        if (!node) return '0';
-                        return String(node.textContent.length);
-                    """)
-                    new_len = int(result2 or "0")
-                    if abs(new_len - total_len) < 50:
-                        return best_text
-                except Exception:
-                    return best_text
-
-        return best_text
+        return ""
