@@ -277,15 +277,8 @@ class MvlempyrScraper(BaseScraper):
         self._api_tab = tab
 
         try:
-            print("mvlempyr: запрашиваю количество глав через API...")
-            total = self._fetch_total_chapters(tab, tag_id)
-            if not total or total <= 0:
-                print("mvlempyr: API не вернул количество глав, пробую фолбэк...")
-                return self._fallback_chapters_from_html(tab, book_id)
-
-            print(f"mvlempyr: всего глав: {total}")
-
-            chapters = self._fetch_all_chapters(tab, tag_id, total, book_id)
+            print("mvlempyr: загружаю оглавление через API...")
+            chapters = self._fetch_all_chapters(tab, tag_id, book_id)
             if chapters:
                 print(f"mvlempyr: получено {len(chapters)} глав из API")
                 return chapters
@@ -297,121 +290,92 @@ class MvlempyrScraper(BaseScraper):
             self._api_tab = None
             raise
 
-    def _fetch_via_js(self, tab, api_url: str, var_name: str,
-                      max_wait: int = 120) -> Optional[str]:
-        """Инжектит async fetch() и опрашивает результат.
+    WP_API = "https://chap.heliosarchive.online/wp-json/wp/v2/posts"
 
-        Использует fetch() а не XHR — fetch работает для cross-origin
-        (сам сайт mvlempyr использует fetch к heliosarchive.online).
-        """
-        inject_js = f"""
-            window.{var_name} = null;
-            fetch('{api_url}')
-                .then(function(r) {{
-                    window.{var_name}_status = r.status;
-                    window.{var_name}_total = r.headers.get('X-WP-Total') || '0';
-                    return r.text();
-                }})
-                .then(function(text) {{
-                    window.{var_name} = text;
-                }})
-                .catch(function(e) {{
-                    window.{var_name} = 'ERR:' + e.message;
-                }});
+    def _navigate_and_read_json(self, tab, url: str, max_wait: int = 90) -> Optional[str]:
+        """Открывает API URL прямо в браузере и читает JSON из страницы.
+
+        Никакого JS-инжекта. Браузер сам грузит URL, мы читаем текст.
         """
         try:
-            tab.run_js(inject_js)
+            tab.get(url, timeout=max_wait, retry=2)
         except Exception as e:
-            print(f"  fetch inject ошибка: {e}")
-            return None
+            print(f"  навигация к API ошибка: {e}")
 
-        # Опрашиваем результат
-        for i in range(max_wait // 2):
-            time.sleep(2)
+        # Ждём пока на странице появится JSON (начинается с [ или {)
+        for i in range(max_wait // 3):
+            time.sleep(3)
             try:
-                result = tab.run_js(f"return window.{var_name}")
+                text = tab.run_js("return document.body?.innerText || document.body?.textContent || ''")
             except Exception:
                 continue
 
-            if result is not None and result != "null":
-                return str(result)
+            if not text:
+                continue
 
-            if i > 0 and i % 10 == 0:
-                print(f"    жду ответ API... ({i * 2}s)")
+            text = str(text).strip()
+            if text.startswith("[") or text.startswith("{"):
+                return text
+
+            # Проверяем на CloudFlare / ошибку
+            if "Host not in allowlist" in text:
+                print(f"  API заблокировал: Host not in allowlist")
+                return None
+
+            if i > 0 and i % 5 == 0:
+                print(f"    жду JSON... ({(i + 1) * 3}s)")
 
         return None
 
-    def _fetch_total_chapters(self, tab, tag_id: int) -> int:
-        api_url = (
-            f"https://chap.heliosarchive.online/wp-json/wp/v2/posts"
-            f"?tags={tag_id}&per_page=1"
-        )
-
-        for attempt in range(3):
-            result = self._fetch_via_js(tab, api_url, f"_mvl_total_{attempt}",
-                                        max_wait=60)
-            if not result:
-                print(f"  таймаут (попытка {attempt + 1})")
-                continue
-
-            if result.startswith("ERR:"):
-                print(f"  API ошибка: {result}")
-                continue
-
-            # Получаем X-WP-Total из сохранённой переменной
-            try:
-                total = tab.run_js(f"return window._mvl_total_{attempt}_total")
-                if total:
-                    return int(total)
-            except Exception:
-                pass
-
-            # Фолбэк: парсим JSON и считаем
-            try:
-                data = json.loads(result)
-                if isinstance(data, list):
-                    return len(data)
-            except Exception:
-                pass
-
-            print(f"  неожиданный ответ (попытка {attempt + 1})")
-
-        return 0
-
-    def _fetch_all_chapters(self, tab, tag_id: int, total: int,
+    def _fetch_all_chapters(self, tab, tag_id: int,
                             book_id: int) -> List[dict]:
-        pages_needed = (total + 49) // 50
         all_posts = []
+        page_num = 1
 
-        for page_num in range(1, pages_needed + 1):
-            api_url = (
-                f"https://chap.heliosarchive.online/wp-json/wp/v2/posts"
-                f"?tags={tag_id}&per_page=50&page={page_num}"
-            )
-            print(f"  загрузка {page_num}/{pages_needed}...")
+        while True:
+            url = f"{self.WP_API}?tags={tag_id}&per_page=100&page={page_num}"
+            print(f"  загрузка страницы {page_num}...")
 
-            var_name = f"_mvl_ch_{page_num}"
-            result = self._fetch_via_js(tab, api_url, var_name, max_wait=120)
-
-            if not result or result.startswith("ERR:"):
-                print(f"  не удалось загрузить страницу {page_num}: {result}")
-                continue
+            result = self._navigate_and_read_json(tab, url, max_wait=90)
+            if not result:
+                if all_posts:
+                    print(f"  страница {page_num} пустая, завершаю")
+                    break
+                print(f"  не удалось загрузить страницу {page_num}")
+                break
 
             try:
                 data = json.loads(result)
-                for p in data:
-                    acf = p.get("acf") or {}
-                    all_posts.append({
-                        "ch_name": acf.get("ch_name") or
-                                   (p.get("title", {}).get("rendered") if isinstance(p.get("title"), dict) else "") or "",
-                        "ch_num": acf.get("chapter_number", ""),
-                        "link": p.get("link", ""),
-                        "slug": p.get("slug", ""),
-                        "date": p.get("date", ""),
-                    })
-                print(f"  получено {len(data)} постов")
             except Exception as e:
                 print(f"  ошибка парсинга JSON: {e}")
+                break
+
+            if not isinstance(data, list) or len(data) == 0:
+                print(f"  страница {page_num}: пустой ответ, завершаю")
+                break
+
+            for p in data:
+                acf = p.get("acf") or {}
+                title = p.get("title")
+                rendered_title = ""
+                if isinstance(title, dict):
+                    rendered_title = title.get("rendered", "")
+                elif isinstance(title, str):
+                    rendered_title = title
+
+                all_posts.append({
+                    "ch_name": acf.get("ch_name") or rendered_title or "",
+                    "ch_num": acf.get("chapter_number", ""),
+                    "link": p.get("link", ""),
+                    "slug": p.get("slug", ""),
+                    "date": p.get("date", ""),
+                })
+
+            print(f"  получено {len(data)} постов (всего: {len(all_posts)})")
+
+            if len(data) < 100:
+                break
+            page_num += 1
 
         if not all_posts:
             return []
@@ -526,7 +490,7 @@ class MvlempyrScraper(BaseScraper):
         super().close_browser()
 
     def get_chapter_text(self, chapter_url: str) -> str:
-        """Загружает текст главы через WordPress API (без открытия страниц)."""
+        """Загружает текст главы через WordPress API (навигация в браузере)."""
         m = re.search(r"/chapter/(\d+-\d+)", chapter_url)
         if not m:
             return ""
@@ -540,20 +504,14 @@ class MvlempyrScraper(BaseScraper):
             f"https://chap.heliosarchive.online/wp-json/wp/v2/posts"
             f"?slug={slug}&_fields=content"
         )
-        var_name = f"_mvl_txt_{slug.replace('-', '_')}"
 
         for attempt in range(3):
-            result = self._fetch_via_js(tab, api_url, var_name, max_wait=60)
+            result = self._navigate_and_read_json(tab, api_url, max_wait=60)
 
             if not result:
                 print(f"  таймаут главы {slug} (попытка {attempt + 1})")
                 continue
 
-            if result.startswith("ERR:"):
-                print(f"  ошибка главы {slug}: {result}")
-                continue
-
-            # Парсим JSON → извлекаем content.rendered → текст
             try:
                 data = json.loads(result)
                 if not data or not isinstance(data, list):
