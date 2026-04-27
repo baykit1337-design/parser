@@ -297,82 +297,84 @@ class MvlempyrScraper(BaseScraper):
             self._api_tab = None
             raise
 
-    @staticmethod
-    def _sync_xhr_js(api_url: str, parse_mode: str = "header") -> str:
-        """JS-код для синхронного XMLHttpRequest (без async/await).
+    def _fetch_via_js(self, tab, api_url: str, var_name: str,
+                      max_wait: int = 120) -> Optional[str]:
+        """Инжектит async fetch() и опрашивает результат.
 
-        parse_mode='header' — возвращает X-WP-Total
-        parse_mode='json'   — возвращает JSON тело ответа
+        Использует fetch() а не XHR — fetch работает для cross-origin
+        (сам сайт mvlempyr использует fetch к heliosarchive.online).
         """
-        if parse_mode == "header":
-            return f"""
-                try {{
-                    var xhr = new XMLHttpRequest();
-                    xhr.open('GET', '{api_url}', false);
+        inject_js = f"""
+            window.{var_name} = null;
+            fetch('{api_url}')
+                .then(function(r) {{
+                    window.{var_name}_status = r.status;
+                    window.{var_name}_total = r.headers.get('X-WP-Total') || '0';
+                    return r.text();
+                }})
+                .then(function(text) {{
+                    window.{var_name} = text;
+                }})
+                .catch(function(e) {{
+                    window.{var_name} = 'ERR:' + e.message;
+                }});
+        """
+        try:
+            tab.run_js(inject_js)
+        except Exception as e:
+            print(f"  fetch inject ошибка: {e}")
+            return None
 
-                    xhr.send();
-                    if (xhr.status !== 200) return 'ERR:' + xhr.status + ':' + xhr.responseText.substring(0, 200);
-                    return xhr.getResponseHeader('X-WP-Total') || '0';
-                }} catch(e) {{
-                    return 'ERR:' + e.message;
-                }}
-            """
-        return f"""
-            try {{
-                var xhr = new XMLHttpRequest();
-                xhr.open('GET', '{api_url}', false);
-                xhr.send();
-                if (xhr.status !== 200) return 'ERR:' + xhr.status;
-                var data = JSON.parse(xhr.responseText);
-                var result = [];
-                for (var i = 0; i < data.length; i++) {{
-                    var p = data[i];
-                    var acf = p.acf || {{}};
-                    result.push({{
-                        ch_name: acf.ch_name || (p.title && p.title.rendered) || '',
-                        ch_num: acf.chapter_number || '',
-                        link: p.link || '',
-                        slug: p.slug || '',
-                        date: p.date || ''
-                    }});
-                }}
-                return JSON.stringify(result);
-            }} catch(e) {{
-                return 'ERR:' + e.message;
-            }}
-        """
+        # Опрашиваем результат
+        for i in range(max_wait // 2):
+            time.sleep(2)
+            try:
+                result = tab.run_js(f"return window.{var_name}")
+            except Exception:
+                continue
+
+            if result is not None and result != "null":
+                return str(result)
+
+            if i > 0 and i % 10 == 0:
+                print(f"    жду ответ API... ({i * 2}s)")
+
+        return None
 
     def _fetch_total_chapters(self, tab, tag_id: int) -> int:
         api_url = (
             f"https://chap.heliosarchive.online/wp-json/wp/v2/posts"
             f"?tags={tag_id}&per_page=1"
         )
-        js = self._sync_xhr_js(api_url, "header")
 
         for attempt in range(3):
-            try:
-                result = tab.run_js(js, timeout=120)
-            except Exception as e:
-                print(f"  XHR ошибка (попытка {attempt + 1}): {e}")
-                time.sleep(5)
-                continue
-
+            result = self._fetch_via_js(tab, api_url, f"_mvl_total_{attempt}",
+                                        max_wait=60)
             if not result:
-                print(f"  пустой ответ (попытка {attempt + 1})")
-                time.sleep(5)
+                print(f"  таймаут (попытка {attempt + 1})")
                 continue
 
-            result = str(result)
             if result.startswith("ERR:"):
                 print(f"  API ошибка: {result}")
-                time.sleep(5)
                 continue
 
+            # Получаем X-WP-Total из сохранённой переменной
             try:
-                return int(result)
-            except ValueError:
-                print(f"  неожиданный ответ: {result}")
-                time.sleep(5)
+                total = tab.run_js(f"return window._mvl_total_{attempt}_total")
+                if total:
+                    return int(total)
+            except Exception:
+                pass
+
+            # Фолбэк: парсим JSON и считаем
+            try:
+                data = json.loads(result)
+                if isinstance(data, list):
+                    return len(data)
+            except Exception:
+                pass
+
+            print(f"  неожиданный ответ (попытка {attempt + 1})")
 
         return 0
 
@@ -386,31 +388,28 @@ class MvlempyrScraper(BaseScraper):
                 f"https://chap.heliosarchive.online/wp-json/wp/v2/posts"
                 f"?tags={tag_id}&per_page=50&page={page_num}"
             )
-            print(f"  загрузка страницы {page_num}/{pages_needed}...")
+            print(f"  загрузка {page_num}/{pages_needed}...")
 
-            js = self._sync_xhr_js(api_url, "json")
-            posts_json = None
-            for attempt in range(3):
-                try:
-                    posts_json = tab.run_js(js, timeout=120)
-                except Exception as e:
-                    print(f"    ошибка (попытка {attempt + 1}): {e}")
-                    time.sleep(5)
-                    continue
+            var_name = f"_mvl_ch_{page_num}"
+            result = self._fetch_via_js(tab, api_url, var_name, max_wait=120)
 
-                if posts_json and not str(posts_json).startswith("ERR:"):
-                    break
-                print(f"    {posts_json} (попытка {attempt + 1})")
-                time.sleep(5)
-
-            if not posts_json or str(posts_json).startswith("ERR:"):
-                print(f"  не удалось загрузить страницу {page_num}")
+            if not result or result.startswith("ERR:"):
+                print(f"  не удалось загрузить страницу {page_num}: {result}")
                 continue
 
             try:
-                posts = json.loads(posts_json)
-                all_posts.extend(posts)
-                print(f"  получено {len(posts)} постов")
+                data = json.loads(result)
+                for p in data:
+                    acf = p.get("acf") or {}
+                    all_posts.append({
+                        "ch_name": acf.get("ch_name") or
+                                   (p.get("title", {}).get("rendered") if isinstance(p.get("title"), dict) else "") or "",
+                        "ch_num": acf.get("chapter_number", ""),
+                        "link": p.get("link", ""),
+                        "slug": p.get("slug", ""),
+                        "date": p.get("date", ""),
+                    })
+                print(f"  получено {len(data)} постов")
             except Exception as e:
                 print(f"  ошибка парсинга JSON: {e}")
 
@@ -541,48 +540,45 @@ class MvlempyrScraper(BaseScraper):
             f"https://chap.heliosarchive.online/wp-json/wp/v2/posts"
             f"?slug={slug}&_fields=content"
         )
-        js = f"""
-            try {{
-                var xhr = new XMLHttpRequest();
-                xhr.open('GET', '{api_url}', false);
-                xhr.send();
-                if (xhr.status !== 200) return 'ERR:' + xhr.status;
-                var data = JSON.parse(xhr.responseText);
-                if (!data.length) return 'ERR:no_post';
-                var html = data[0].content && data[0].content.rendered || '';
-                if (!html) return 'ERR:no_content';
-                var div = document.createElement('div');
-                div.innerHTML = html;
-                var ps = div.querySelectorAll('p');
-                var texts = [];
-                for (var i = 0; i < ps.length; i++) {{
-                    var t = ps[i].textContent.trim();
-                    if (t.length > 1) texts.push(t);
-                }}
-                if (texts.length > 0) return texts.join('\\n');
-                return div.textContent.trim();
-            }} catch(e) {{
-                return 'ERR:' + e.message;
-            }}
-        """
+        var_name = f"_mvl_txt_{slug.replace('-', '_')}"
+
         for attempt in range(3):
-            try:
-                result = tab.run_js(js, timeout=120)
-            except Exception as e:
-                print(f"  XHR ошибка главы {slug} (попытка {attempt + 1}): {e}")
-                time.sleep(3)
-                continue
+            result = self._fetch_via_js(tab, api_url, var_name, max_wait=60)
 
             if not result:
-                time.sleep(2)
+                print(f"  таймаут главы {slug} (попытка {attempt + 1})")
                 continue
 
-            result = str(result)
             if result.startswith("ERR:"):
-                print(f"  API ошибка главы {slug}: {result}")
-                time.sleep(2)
+                print(f"  ошибка главы {slug}: {result}")
                 continue
 
-            return result
+            # Парсим JSON → извлекаем content.rendered → текст
+            try:
+                data = json.loads(result)
+                if not data or not isinstance(data, list):
+                    continue
+                content_html = ""
+                if isinstance(data[0].get("content"), dict):
+                    content_html = data[0]["content"].get("rendered", "")
+                elif isinstance(data[0].get("content"), str):
+                    content_html = data[0]["content"]
+                if not content_html:
+                    continue
+
+                soup = BeautifulSoup(content_html, "html.parser")
+                paragraphs = []
+                for p in soup.find_all("p"):
+                    t = p.get_text(" ", strip=True)
+                    if t and len(t) > 1:
+                        paragraphs.append(t)
+                if paragraphs:
+                    return "\n".join(paragraphs)
+                text = soup.get_text("\n", strip=True)
+                if text:
+                    return text
+            except Exception as e:
+                print(f"  ошибка парсинга главы {slug}: {e}")
+                continue
 
         return ""
