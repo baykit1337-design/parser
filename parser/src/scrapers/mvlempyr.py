@@ -309,7 +309,7 @@ class MvlempyrScraper(BaseScraper):
                 try {{
                     var xhr = new XMLHttpRequest();
                     xhr.open('GET', '{api_url}', false);
-                    xhr.timeout = 90000;
+
                     xhr.send();
                     if (xhr.status !== 200) return 'ERR:' + xhr.status + ':' + xhr.responseText.substring(0, 200);
                     return xhr.getResponseHeader('X-WP-Total') || '0';
@@ -321,7 +321,6 @@ class MvlempyrScraper(BaseScraper):
             try {{
                 var xhr = new XMLHttpRequest();
                 xhr.open('GET', '{api_url}', false);
-                xhr.timeout = 90000;
                 xhr.send();
                 if (xhr.status !== 200) return 'ERR:' + xhr.status;
                 var data = JSON.parse(xhr.responseText);
@@ -546,7 +545,6 @@ class MvlempyrScraper(BaseScraper):
             try {{
                 var xhr = new XMLHttpRequest();
                 xhr.open('GET', '{api_url}', false);
-                xhr.timeout = 90000;
                 xhr.send();
                 if (xhr.status !== 200) return 'ERR:' + xhr.status;
                 var data = JSON.parse(xhr.responseText);
