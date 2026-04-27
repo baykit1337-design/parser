@@ -309,6 +309,7 @@ class MvlempyrScraper(BaseScraper):
                 try {{
                     var xhr = new XMLHttpRequest();
                     xhr.open('GET', '{api_url}', false);
+                    xhr.timeout = 90000;
                     xhr.send();
                     if (xhr.status !== 200) return 'ERR:' + xhr.status + ':' + xhr.responseText.substring(0, 200);
                     return xhr.getResponseHeader('X-WP-Total') || '0';
@@ -320,6 +321,7 @@ class MvlempyrScraper(BaseScraper):
             try {{
                 var xhr = new XMLHttpRequest();
                 xhr.open('GET', '{api_url}', false);
+                xhr.timeout = 90000;
                 xhr.send();
                 if (xhr.status !== 200) return 'ERR:' + xhr.status;
                 var data = JSON.parse(xhr.responseText);
@@ -350,28 +352,28 @@ class MvlempyrScraper(BaseScraper):
 
         for attempt in range(3):
             try:
-                result = tab.run_js(js)
+                result = tab.run_js(js, timeout=120)
             except Exception as e:
                 print(f"  XHR ошибка (попытка {attempt + 1}): {e}")
-                time.sleep(3)
+                time.sleep(5)
                 continue
 
             if not result:
                 print(f"  пустой ответ (попытка {attempt + 1})")
-                time.sleep(3)
+                time.sleep(5)
                 continue
 
             result = str(result)
             if result.startswith("ERR:"):
                 print(f"  API ошибка: {result}")
-                time.sleep(3)
+                time.sleep(5)
                 continue
 
             try:
                 return int(result)
             except ValueError:
                 print(f"  неожиданный ответ: {result}")
-                time.sleep(3)
+                time.sleep(5)
 
         return 0
 
@@ -391,7 +393,7 @@ class MvlempyrScraper(BaseScraper):
             posts_json = None
             for attempt in range(3):
                 try:
-                    posts_json = tab.run_js(js)
+                    posts_json = tab.run_js(js, timeout=120)
                 except Exception as e:
                     print(f"    ошибка (попытка {attempt + 1}): {e}")
                     time.sleep(5)
@@ -544,6 +546,7 @@ class MvlempyrScraper(BaseScraper):
             try {{
                 var xhr = new XMLHttpRequest();
                 xhr.open('GET', '{api_url}', false);
+                xhr.timeout = 90000;
                 xhr.send();
                 if (xhr.status !== 200) return 'ERR:' + xhr.status;
                 var data = JSON.parse(xhr.responseText);
