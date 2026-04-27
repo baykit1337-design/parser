@@ -290,27 +290,62 @@ class MvlempyrScraper(BaseScraper):
         finally:
             self._close_tab(tab)
 
-    def _fetch_total_chapters(self, tab, tag_id: int) -> int:
-        """Делает fetch к WP API из контекста браузера, получает X-WP-Total."""
-        api_url = (
-            f"https://chap.heliosarchive.online/wp-json/wp/v2/posts"
-            f"?tags={tag_id}&per_page=1"
-        )
-        js = f"""
+    @staticmethod
+    def _sync_xhr_js(api_url: str, parse_mode: str = "header") -> str:
+        """JS-код для синхронного XMLHttpRequest (без async/await).
+
+        parse_mode='header' — возвращает X-WP-Total
+        parse_mode='json'   — возвращает JSON тело ответа
+        """
+        if parse_mode == "header":
+            return f"""
+                try {{
+                    var xhr = new XMLHttpRequest();
+                    xhr.open('GET', '{api_url}', false);
+                    xhr.send();
+                    if (xhr.status !== 200) return 'ERR:' + xhr.status + ':' + xhr.responseText.substring(0, 200);
+                    return xhr.getResponseHeader('X-WP-Total') || '0';
+                }} catch(e) {{
+                    return 'ERR:' + e.message;
+                }}
+            """
+        return f"""
             try {{
-                var resp = await fetch('{api_url}');
-                if (!resp.ok) return 'ERR:' + resp.status + ':' + (await resp.text());
-                var total = resp.headers.get('X-WP-Total') || '0';
-                return total;
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', '{api_url}', false);
+                xhr.send();
+                if (xhr.status !== 200) return 'ERR:' + xhr.status;
+                var data = JSON.parse(xhr.responseText);
+                var result = [];
+                for (var i = 0; i < data.length; i++) {{
+                    var p = data[i];
+                    var acf = p.acf || {{}};
+                    result.push({{
+                        ch_name: acf.ch_name || (p.title && p.title.rendered) || '',
+                        ch_num: acf.chapter_number || '',
+                        link: p.link || '',
+                        slug: p.slug || '',
+                        date: p.date || ''
+                    }});
+                }}
+                return JSON.stringify(result);
             }} catch(e) {{
                 return 'ERR:' + e.message;
             }}
         """
+
+    def _fetch_total_chapters(self, tab, tag_id: int) -> int:
+        api_url = (
+            f"https://chap.heliosarchive.online/wp-json/wp/v2/posts"
+            f"?tags={tag_id}&per_page=1"
+        )
+        js = self._sync_xhr_js(api_url, "header")
+
         for attempt in range(3):
             try:
                 result = tab.run_js(js)
             except Exception as e:
-                print(f"  run_js ошибка (попытка {attempt + 1}): {e}")
+                print(f"  XHR ошибка (попытка {attempt + 1}): {e}")
                 time.sleep(3)
                 continue
 
@@ -335,7 +370,6 @@ class MvlempyrScraper(BaseScraper):
 
     def _fetch_all_chapters(self, tab, tag_id: int, total: int,
                             book_id: int) -> List[dict]:
-        """Загружает все посты-главы через WP API, по 500 за страницу."""
         pages_needed = (total + 499) // 500
         all_posts = []
 
@@ -346,28 +380,7 @@ class MvlempyrScraper(BaseScraper):
             )
             print(f"  загрузка страницы {page_num}/{pages_needed}...")
 
-            js = f"""
-                try {{
-                    var resp = await fetch('{api_url}');
-                    if (!resp.ok) return 'ERR:' + resp.status;
-                    var data = await resp.json();
-                    var result = [];
-                    for (var i = 0; i < data.length; i++) {{
-                        var p = data[i];
-                        var acf = p.acf || {{}};
-                        result.push({{
-                            ch_name: acf.ch_name || p.title?.rendered || '',
-                            ch_num: acf.chapter_number || '',
-                            link: p.link || '',
-                            slug: p.slug || '',
-                            date: p.date || ''
-                        }});
-                    }}
-                    return JSON.stringify(result);
-                }} catch(e) {{
-                    return 'ERR:' + e.message;
-                }}
-            """
+            js = self._sync_xhr_js(api_url, "json")
             posts_json = None
             for attempt in range(3):
                 try:
