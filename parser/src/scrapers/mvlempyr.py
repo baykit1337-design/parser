@@ -64,16 +64,116 @@ class MvlempyrScraper(BaseScraper):
 
     # --- browser tab management -------------------------------------------
 
-    def _open_tab(self, url: str):
+    def _open_tab_and_load(self, url: str, max_wait: int = 90):
+        """Открывает вкладку и ГАРАНТИРУЕТ что страница реально загрузилась.
+
+        1. Создаёт пустую вкладку
+        2. Навигация через tab.get() с таймаутом
+        3. Проверяет что страница не CloudFlare challenge
+        4. Проверяет что появился реальный контент mvlempyr
+        5. Если зависло — пробует refresh
+
+        Возвращает tab или None.
+        """
         page = self._get_browser_page()
         if not page:
             return None
+
+        tab = None
         try:
-            tab = page.new_tab(url)
-            return tab
+            tab = page.new_tab()
         except Exception as e:
-            print(f"mvlempyr: не удалось открыть вкладку: {e}")
+            print(f"mvlempyr: не удалось создать вкладку: {e}")
             return None
+
+        try:
+            print(f"  навигация: {url}")
+            tab.get(url, timeout=max_wait, retry=2)
+        except Exception as e:
+            print(f"  tab.get() завершился с ошибкой: {e}")
+            print(f"  проверяю что загрузилось...")
+
+        # Проверяем что реально загрузилось
+        loaded = self._verify_page_loaded(tab, url, max_wait=max_wait)
+        if loaded:
+            return tab
+
+        # Страница не загрузилась — пробуем refresh
+        print(f"  страница не загружена, пробую refresh...")
+        try:
+            tab.refresh()
+            time.sleep(5)
+        except Exception:
+            pass
+
+        loaded = self._verify_page_loaded(tab, url, max_wait=60)
+        if loaded:
+            return tab
+
+        print(f"  страница так и не загрузилась")
+        return tab  # возвращаем как есть, может частично загружено
+
+    def _verify_page_loaded(self, tab, url: str, max_wait: int = 90) -> bool:
+        """Проверяет что страница mvlempyr реально загрузилась.
+
+        Не просто смотрит на размер HTML, а ищет конкретные признаки:
+        - URL содержит mvlempyr
+        - Есть элементы #chapter, .NovelName, nav, и т.д.
+        - Нет CloudFlare challenge
+        """
+        checks = max_wait // 4
+        last_len = 0
+        saw_content = False
+
+        for i in range(checks):
+            time.sleep(4)
+            try:
+                html = tab.html or ""
+                cur_url = tab.url or ""
+            except Exception:
+                continue
+
+            html_len = len(html)
+
+            # CloudFlare challenge — продолжаем ждать
+            if self._is_cloudflare_challenge(html):
+                print(f"  CloudFlare... ({(i + 1) * 4}s, {html_len} символов)")
+                last_len = html_len
+                continue
+
+            # Пустая или слишком маленькая страница
+            if html_len < 1000:
+                if i > 0 and i % 5 == 0:
+                    print(f"  страница почти пустая ({html_len} символов, {(i + 1) * 4}s)")
+                last_len = html_len
+                continue
+
+            # Проверяем наличие конкретных признаков mvlempyr
+            has_chapter = "#chapter" in html or "chapter-content" in html
+            has_novel = "NovelName" in html or "novel-name" in html
+            has_mvl = "mvlempyr" in html.lower() or "heliosarchive" in html
+            has_nav = "prev-top" in html or "next-top" in html
+
+            if has_chapter or has_novel or has_mvl or has_nav:
+                print(f"  страница загружена! ({html_len} символов, {(i + 1) * 4}s)")
+                return True
+
+            # Если HTML большой и стабильный — тоже считаем загруженным
+            if html_len > 5000:
+                if abs(html_len - last_len) < 300:
+                    if saw_content:
+                        print(f"  страница стабилизировалась ({html_len} символов, {(i + 1) * 4}s)")
+                        return True
+                    saw_content = True
+                else:
+                    saw_content = False
+
+            last_len = html_len
+
+            if i > 0 and i % 5 == 0:
+                print(f"  жду загрузку... ({html_len} символов, {(i + 1) * 4}s)")
+
+        return last_len > 5000
 
     def _close_tab(self, tab):
         if tab:
@@ -82,47 +182,13 @@ class MvlempyrScraper(BaseScraper):
             except Exception:
                 pass
 
-    def _wait_page_ready(self, tab, max_wait: int = 90) -> bool:
-        """Ждёт пока страница загрузится (CloudFlare + начальный рендер).
-
-        Для медленного интернета: до max_wait секунд.
-        Возвращает True если страница загружена.
-        """
-        checks = max_wait // 3
-        last_len = 0
-        stable = 0
-
-        for i in range(checks):
-            time.sleep(3)
-            try:
-                html = tab.html or ""
-            except Exception:
-                continue
-
-            if self._is_cloudflare_challenge(html):
-                print(f"  CloudFlare challenge... ({i * 3}s)")
-                stable = 0
-                last_len = len(html)
-                continue
-
-            cur_len = len(html)
-            if cur_len > 2000:
-                if abs(cur_len - last_len) < 200:
-                    stable += 1
-                    if stable >= 2:
-                        return True
-                else:
-                    stable = 0
-                last_len = cur_len
-
-        return last_len > 2000
-
     # --- book info --------------------------------------------------------
 
     def get_book_info(self, url: str) -> dict:
         book_id, ch_num = self._parse_chapter_url(url)
 
-        tab = self._open_tab(url)
+        print("mvlempyr: загружаю страницу для info...")
+        tab = self._open_tab_and_load(url, max_wait=60)
         if not tab:
             slug = self._extract_slug(url)
             return {
@@ -133,8 +199,6 @@ class MvlempyrScraper(BaseScraper):
 
         title = None
         try:
-            print(f"mvlempyr: загружаю страницу для info...")
-            self._wait_page_ready(tab, max_wait=60)
             html = tab.html or ""
             soup = BeautifulSoup(html, "html.parser")
 
@@ -189,18 +253,12 @@ class MvlempyrScraper(BaseScraper):
                 return []
 
         # Открываем страницу главы
-        print(f"mvlempyr: открываю страницу главы...")
-        tab = self._open_tab(chapter_url)
+        print("mvlempyr: открываю страницу главы...")
+        tab = self._open_tab_and_load(chapter_url, max_wait=90)
         if not tab:
             return []
 
         try:
-            # 1. Ждём загрузки страницы
-            print(f"mvlempyr: жду загрузку страницы (медленный интернет — терпение)...")
-            if not self._wait_page_ready(tab, max_wait=90):
-                print("mvlempyr: страница не загрузилась за 90 секунд")
-                return []
-
             # Извлекаем book_id из HTML если ещё нет
             if not book_id:
                 try:
@@ -299,13 +357,12 @@ class MvlempyrScraper(BaseScraper):
 
     def _find_chapter_url_from_novel(self, novel_url: str, book_id: Optional[int]) -> Optional[str]:
         """Загружает страницу новеллы и ищет ссылку на первую главу."""
-        tab = self._open_tab(novel_url)
+        print("mvlempyr: загружаю страницу новеллы для поиска главы...")
+        tab = self._open_tab_and_load(novel_url, max_wait=60)
         if not tab:
             return None
 
         try:
-            print("mvlempyr: загружаю страницу новеллы для поиска главы...")
-            self._wait_page_ready(tab, max_wait=60)
             html = tab.html or ""
             soup = BeautifulSoup(html, "html.parser")
 
@@ -420,16 +477,11 @@ class MvlempyrScraper(BaseScraper):
     def get_chapter_text(self, chapter_url: str) -> str:
         time.sleep(0.5)
 
-        tab = self._open_tab(chapter_url)
+        tab = self._open_tab_and_load(chapter_url, max_wait=90)
         if not tab:
             return ""
 
         try:
-            # Ждём загрузки страницы
-            if not self._wait_page_ready(tab, max_wait=90):
-                print(f"mvlempyr: страница не загрузилась: {chapter_url}")
-                return ""
-
             # Ждём появления реального контента (не "LOADING")
             text = self._wait_for_chapter_content(tab, max_wait=60)
             return text
