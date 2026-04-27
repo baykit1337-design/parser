@@ -378,13 +378,13 @@ class MvlempyrScraper(BaseScraper):
 
     def _fetch_all_chapters(self, tab, tag_id: int, total: int,
                             book_id: int) -> List[dict]:
-        pages_needed = (total + 499) // 500
+        pages_needed = (total + 49) // 50
         all_posts = []
 
         for page_num in range(1, pages_needed + 1):
             api_url = (
                 f"https://chap.heliosarchive.online/wp-json/wp/v2/posts"
-                f"?tags={tag_id}&per_page=500&page={page_num}"
+                f"?tags={tag_id}&per_page=50&page={page_num}"
             )
             print(f"  загрузка страницы {page_num}/{pages_needed}...")
 
